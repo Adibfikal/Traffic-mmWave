@@ -132,6 +132,12 @@ class RadarGUI(QMainWindow):
         self.start_btn.setEnabled(False)
         button_layout.addWidget(self.start_btn)
         
+        # Debug mode checkbox
+        self.debug_checkbox = QPushButton("Debug Mode: OFF")
+        self.debug_checkbox.setCheckable(True)
+        self.debug_checkbox.toggled.connect(self.toggle_debug_mode)
+        button_layout.addWidget(self.debug_checkbox)
+        
         layout.addLayout(button_layout)
         
         # Status display
@@ -256,25 +262,95 @@ class RadarGUI(QMainWindow):
     def send_configuration(self):
         """Send configuration to the radar"""
         if self.radar_thread.radar:
-            success = self.radar_thread.radar.send_config()
+            result = self.radar_thread.radar.send_config()
+            
+            # Handle the new return format (tuple)
+            if isinstance(result, tuple):
+                success, response = result
+            else:
+                # Fallback for old format
+                success = result
+                response = None
+            
             if success:
                 self.start_btn.setEnabled(True)
                 self.log_status("Configuration sent successfully")
+                
+                # Show debug information if enabled
+                if self.debug_checkbox.isChecked() and response:
+                    self.log_status("=== DEBUG: Configuration Responses ===")
+                    if isinstance(response, list):
+                        for item in response:
+                            if isinstance(item, dict):
+                                self.log_status(f"CMD: {item['command']}")
+                                self.log_status(f"RSP: {item['response']}")
+                            else:
+                                self.log_status(f"RSP: {item}")
+                    else:
+                        self.log_status(f"Response: {response}")
+                    self.log_status("=== END DEBUG ===")
             else:
                 self.log_status("Failed to send configuration")
+                if self.debug_checkbox.isChecked() and response:
+                    self.log_status(f"DEBUG: Error details: {response}")
                 
     def toggle_sensor(self):
         """Start or stop the sensor"""
         if self.start_btn.text() == "Start Sensor":
             if self.radar_thread.radar:
-                self.radar_thread.radar.start_sensor()
-                self.start_btn.setText("Stop Sensor")
-                self.log_status("Sensor started")
+                result = self.radar_thread.radar.start_sensor()
+                
+                # Handle the new return format (tuple)
+                if isinstance(result, tuple):
+                    success, response = result
+                else:
+                    # Fallback for old format
+                    success = True
+                    response = None
+                
+                if success:
+                    self.start_btn.setText("Stop Sensor")
+                    self.log_status("Sensor started")
+                    
+                    # Show debug information if enabled
+                    if self.debug_checkbox.isChecked() and response:
+                        self.log_status(f"DEBUG: Start sensor response: {response}")
+                else:
+                    self.log_status("Failed to start sensor")
+                    if self.debug_checkbox.isChecked() and response:
+                        self.log_status(f"DEBUG: Error: {response}")
         else:
             if self.radar_thread.radar:
-                self.radar_thread.radar.stop_sensor()
-                self.start_btn.setText("Start Sensor")
-                self.log_status("Sensor stopped")
+                result = self.radar_thread.radar.stop_sensor()
+                
+                # Handle the new return format (tuple)
+                if isinstance(result, tuple):
+                    success, response = result
+                else:
+                    # Fallback for old format
+                    success = True
+                    response = None
+                
+                if success:
+                    self.start_btn.setText("Start Sensor")
+                    self.log_status("Sensor stopped")
+                    
+                    # Show debug information if enabled
+                    if self.debug_checkbox.isChecked() and response:
+                        self.log_status(f"DEBUG: Stop sensor response: {response}")
+                else:
+                    self.log_status("Failed to stop sensor")
+                    if self.debug_checkbox.isChecked() and response:
+                        self.log_status(f"DEBUG: Error: {response}")
+                
+    def toggle_debug_mode(self, checked):
+        """Toggle debug mode"""
+        if checked:
+            self.debug_checkbox.setText("Debug Mode: ON")
+            self.log_status("Debug mode enabled")
+        else:
+            self.debug_checkbox.setText("Debug Mode: OFF")
+            self.log_status("Debug mode disabled")
                 
     @pyqtSlot(dict)
     def update_data(self, data):

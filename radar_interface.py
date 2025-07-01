@@ -62,8 +62,9 @@ class RadarInterface:
     def send_config(self, config_file='xwr68xx_config.cfg'):
         """Send radar configuration commands from file"""
         if not self.cli_serial or not self.cli_serial.is_open:
-            return False
+            return False, "CLI serial port is not open"
             
+        responses = []
         try:
             # Read configuration from file if provided
             config_commands = []
@@ -117,30 +118,38 @@ class RadarInterface:
                 time.sleep(0.01)
                 
                 # Read response
-                response = self.cli_serial.read(256)
-                if b'Error' in response:
+                response = self.cli_serial.read(256).decode('utf-8', errors='ignore').strip()
+                responses.append({'command': cmd, 'response': response})
+                
+                if 'Error' in response:
                     print(f"Error in command: {cmd}")
-                    return False
+                    return False, responses
                     
-            return True
+            return True, responses
             
         except Exception as e:
             print(f"Error sending configuration: {str(e)}")
-            return False
+            return False, f"Exception: {str(e)}"
             
     def start_sensor(self):
         """Start the sensor"""
         if self.cli_serial and self.cli_serial.is_open:
             self.cli_serial.write(b'sensorStart\n')
-            self.is_sensor_running = True
             time.sleep(0.1)
+            response = self.cli_serial.read(256).decode('utf-8', errors='ignore').strip()
+            self.is_sensor_running = True
+            return True, response
+        return False, "CLI serial port is not open"
             
     def stop_sensor(self):
         """Stop the sensor"""
         if self.cli_serial and self.cli_serial.is_open:
             self.cli_serial.write(b'sensorStop\n')
-            self.is_sensor_running = False
             time.sleep(0.1)
+            response = self.cli_serial.read(256).decode('utf-8', errors='ignore').strip()
+            self.is_sensor_running = False
+            return True, response
+        return False, "CLI serial port is not open"
             
     def read_data(self):
         """Read and parse radar data"""
