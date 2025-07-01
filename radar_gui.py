@@ -105,11 +105,11 @@ class RadarGUI(QMainWindow):
         port_layout = QGridLayout()
         
         port_layout.addWidget(QLabel("CLI Port:"), 0, 0)
-        self.cli_port_input = QLineEdit("COM4")
+        self.cli_port_input = QLineEdit("COM3")  # Enhanced COM Port for CLI
         port_layout.addWidget(self.cli_port_input, 0, 1)
         
         port_layout.addWidget(QLabel("Data Port:"), 1, 0)
-        self.data_port_input = QLineEdit("COM3")
+        self.data_port_input = QLineEdit("COM4")  # Standard COM Port for Data
         port_layout.addWidget(self.data_port_input, 1, 1)
         
         port_group.setLayout(port_layout)
@@ -275,40 +275,10 @@ class RadarGUI(QMainWindow):
             if success:
                 self.start_btn.setEnabled(True)
                 self.log_status("Configuration sent successfully")
-                
-                # Show debug information if enabled
-                if self.debug_checkbox.isChecked() and response:
-                    self.log_status("=== DEBUG: Configuration Responses ===")
-                    if isinstance(response, list):
-                        for item in response:
-                            if isinstance(item, dict):
-                                self.log_status(f"CMD: {item['command']}")
-                                resp_text = item['response']
-                                
-                                # Show the response
-                                if resp_text == "No response":
-                                    self.log_status("RSP: No response received")
-                                elif resp_text.startswith("Decode error:"):
-                                    self.log_status(f"RSP: {resp_text}")
-                                else:
-                                    # Show decoded response
-                                    self.log_status(f"RSP: {resp_text}")
-                                    
-                                    # If response contains non-ASCII characters, show hex
-                                    if any(ord(c) > 127 or ord(c) < 32 for c in resp_text if c not in '\n\r\t'):
-                                        hex_str = ' '.join(f'{ord(c):02X}' for c in resp_text[:50])
-                                        if len(resp_text) > 50:
-                                            hex_str += "..."
-                                        self.log_status(f"HEX: {hex_str}")
-                            else:
-                                self.log_status(f"RSP: {item}")
-                    else:
-                        self.log_status(f"Response: {response}")
-                    self.log_status("=== END DEBUG ===")
             else:
                 self.log_status("Failed to send configuration")
-                if self.debug_checkbox.isChecked() and response:
-                    self.log_status(f"DEBUG: Error details: {response}")
+                if response:
+                    self.log_status(f"Error details: {response}")
                 
     def toggle_sensor(self):
         """Start or stop the sensor"""
@@ -327,14 +297,10 @@ class RadarGUI(QMainWindow):
                 if success:
                     self.start_btn.setText("Stop Sensor")
                     self.log_status("Sensor started")
-                    
-                    # Show debug information if enabled
-                    if self.debug_checkbox.isChecked() and response:
-                        self.log_status(f"DEBUG: Start sensor response: {response}")
                 else:
                     self.log_status("Failed to start sensor")
-                    if self.debug_checkbox.isChecked() and response:
-                        self.log_status(f"DEBUG: Error: {response}")
+                    if response:
+                        self.log_status(f"Error: {response}")
         else:
             if self.radar_thread.radar:
                 result = self.radar_thread.radar.stop_sensor()
@@ -350,23 +316,23 @@ class RadarGUI(QMainWindow):
                 if success:
                     self.start_btn.setText("Start Sensor")
                     self.log_status("Sensor stopped")
-                    
-                    # Show debug information if enabled
-                    if self.debug_checkbox.isChecked() and response:
-                        self.log_status(f"DEBUG: Stop sensor response: {response}")
                 else:
                     self.log_status("Failed to stop sensor")
-                    if self.debug_checkbox.isChecked() and response:
-                        self.log_status(f"DEBUG: Error: {response}")
+                    if response:
+                        self.log_status(f"Error: {response}")
                 
     def toggle_debug_mode(self, checked):
-        """Toggle debug mode"""
+        """Toggle debug mode for point cloud data"""
         if checked:
             self.debug_checkbox.setText("Debug Mode: ON")
-            self.log_status("Debug mode enabled")
+            self.log_status("Debug mode enabled - Point cloud data will be printed to terminal")
+            print("\n=== Point Cloud Debug Mode Enabled ===")
+            print("Format: Frame# | Point# | X(m) | Y(m) | Z(m) | Doppler(m/s)")
+            print("=" * 60)
         else:
             self.debug_checkbox.setText("Debug Mode: OFF")
             self.log_status("Debug mode disabled")
+            print("\n=== Point Cloud Debug Mode Disabled ===\n")
                 
     @pyqtSlot(dict)
     def update_data(self, data):
@@ -375,9 +341,37 @@ class RadarGUI(QMainWindow):
         if 'pointCloud' in data:
             self.point_cloud_data = data['pointCloud']
             
-            # Update tracker with new point cloud
-            tracked_objects = self.tracker.update(self.point_cloud_data)
-            self.tracked_objects = tracked_objects
+            # Debug mode: print point cloud data to terminal
+            if self.debug_checkbox.isChecked() and self.point_cloud_data is not None and len(self.point_cloud_data) > 0:
+                frame_num = data.get('header', {}).get('frameNumber', 'N/A')
+                print(f"\nFrame {frame_num}:")
+                print("-" * 60)
+                
+                for i, point in enumerate(self.point_cloud_data):
+                    if len(point) >= 4:
+                        # Include doppler if available
+                        print(f"Point {i:3d}: X={point[0]:7.3f}m  Y={point[1]:7.3f}m  Z={point[2]:7.3f}m  Doppler={point[3]:6.3f}m/s")
+                    else:
+                        # Fallback for old format without doppler
+                        print(f"Point {i:3d}: X={point[0]:7.3f}m  Y={point[1]:7.3f}m  Z={point[2]:7.3f}m")
+                
+                print(f"Total points: {len(self.point_cloud_data)}")
+            
+            # Update tracker with new point cloud (need to handle 4D points)
+            if self.point_cloud_data is not None and len(self.point_cloud_data) > 0:
+                # Extract only x,y,z for tracker (it expects 3D points)
+                points_3d = self.point_cloud_data[:, :3] if self.point_cloud_data.shape[1] >= 3 else self.point_cloud_data
+                
+                # Check if we have enough points for clustering (HDBSCAN needs at least 2)
+                if len(points_3d) >= 2:
+                    tracked_objects = self.tracker.update(points_3d)
+                    self.tracked_objects = tracked_objects
+                else:
+                    # For single points, just treat as untracked objects
+                    self.tracked_objects = {}
+            else:
+                tracked_objects = self.tracker.update(None)
+                self.tracked_objects = tracked_objects
             
             # Update trails
             self.update_trails()
@@ -408,11 +402,17 @@ class RadarGUI(QMainWindow):
         """Update both 3D and 2D visualizations"""
         # Update 3D point cloud
         if self.point_cloud_data is not None and len(self.point_cloud_data) > 0:
-            self.point_scatter.setData(pos=self.point_cloud_data)
+            # Extract only x,y,z for 3D visualization
+            if self.point_cloud_data.shape[1] >= 3:
+                points_3d = self.point_cloud_data[:, :3]
+            else:
+                points_3d = self.point_cloud_data
+                
+            self.point_scatter.setData(pos=points_3d)
             
             # Update 2D point cloud (X-Y projection)
-            x_points = self.point_cloud_data[:, 0]
-            y_points = self.point_cloud_data[:, 1]
+            x_points = points_3d[:, 0]
+            y_points = points_3d[:, 1]
             self.point_scatter_2d.setData(x_points, y_points)
         
         # Update tracked objects and trails

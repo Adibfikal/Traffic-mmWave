@@ -1,3 +1,7 @@
 __pycache__/radar_interface.cpython-313.pyc
 __pycache__/tracking.cpython-313.pyc
 README.md
+test_cli_responses.py
+test_ports.py
+test_with_config.py
+list_ports.py

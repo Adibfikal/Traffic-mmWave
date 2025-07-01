@@ -9,13 +9,26 @@ class RadarInterface:
     """Interface for IWR6843ISK mmWave radar"""
     
     # Radar configuration parameters based on IWR6843ISK
+    # Magic word as per TI's specification
     MAGIC_WORD = [2, 1, 4, 3, 6, 5, 8, 7]
     
-    # Message types
-    MSG_HEADER_LEN = 36
+    # Message types - Updated based on IWR6843ISK SDK
+    MSG_HEADER_LEN = 40  # 40 bytes for SDK 3.x (8 magic + 8*4 fields)
     TLV_HEADER_LEN = 8
-    POINT_CLOUD_TLV_TYPE = 1
-    TARGET_LIST_TLV_TYPE = 2
+    
+    # TLV Types for SDK 3.x
+    MMWDEMO_OUTPUT_MSG_DETECTED_POINTS = 1
+    MMWDEMO_OUTPUT_MSG_RANGE_PROFILE = 2
+    MMWDEMO_OUTPUT_MSG_NOISE_PROFILE = 3
+    MMWDEMO_OUTPUT_MSG_AZIMUT_STATIC_HEAT_MAP = 4
+    MMWDEMO_OUTPUT_MSG_RANGE_DOPPLER_HEAT_MAP = 5
+    MMWDEMO_OUTPUT_MSG_STATS = 6
+    MMWDEMO_OUTPUT_MSG_DETECTED_POINTS_SIDE_INFO = 7
+    MMWDEMO_OUTPUT_MSG_AZIMUT_ELEVATION_STATIC_HEAT_MAP = 8
+    MMWDEMO_OUTPUT_MSG_TEMPERATURE_STATS = 9
+    
+    # For detected points
+    MMWDEMO_OUTPUT_MSG_POINT_CLOUD_INDICES = 10
     
     def __init__(self, cli_port, data_port):
         """Initialize radar interface with CLI and data ports"""
@@ -25,6 +38,7 @@ class RadarInterface:
         self.data_serial = None
         self.is_sensor_running = False
         self.data_buffer = bytearray()
+        self.frame_count = 0
         
         # Open serial ports
         self._open_ports()
@@ -36,19 +50,30 @@ class RadarInterface:
             self.cli_serial = serial.Serial(
                 port=self.cli_port,
                 baudrate=115200,
-                timeout=0.3
+                timeout=0.3,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+                bytesize=serial.EIGHTBITS
             )
             
             # Open data port for receiving radar data
             self.data_serial = serial.Serial(
                 port=self.data_port,
                 baudrate=921600,
-                timeout=0.1
+                timeout=0.025,  # Reduced timeout for faster reading
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+                bytesize=serial.EIGHTBITS
             )
             
             # Clear any existing data
+            time.sleep(0.1)
             self.cli_serial.reset_input_buffer()
+            self.cli_serial.reset_output_buffer()
             self.data_serial.reset_input_buffer()
+            self.data_serial.reset_output_buffer()
+            
+            print(f"DEBUG: Ports opened successfully - CLI: {self.cli_port}, Data: {self.data_port}")
             
         except Exception as e:
             self.close()
@@ -110,8 +135,13 @@ class RadarInterface:
             
             # Send each command
             for cmd in config_commands:
-                # Skip sensorStart command if present (we'll start manually)
-                if cmd.lower() == 'sensorstart':
+                # Skip empty lines
+                if not cmd or cmd.isspace():
+                    continue
+                    
+                # Handle sensorStart specially
+                if cmd.lower().strip() == 'sensorstart':
+                    print("DEBUG: Found sensorStart in config, skipping (will start manually)")
                     continue
                     
                 # Clear input buffer before sending command
@@ -119,13 +149,13 @@ class RadarInterface:
                 
                 # Send command
                 self.cli_serial.write((cmd + '\n').encode())
-                time.sleep(0.05)  # Increased delay for command processing
+                time.sleep(0.01)  # Small delay between commands
                 
                 # Read response with multiple attempts
                 response = ""
                 max_attempts = 3
                 start_time = time.time()
-                timeout = 0.2  # 200ms timeout
+                timeout = 0.1  # 100ms timeout per command
                 
                 while (time.time() - start_time) < timeout:
                     if self.cli_serial.in_waiting > 0:
@@ -155,6 +185,7 @@ class RadarInterface:
                     print(f"Error in command: {cmd}")
                     return False, responses
                     
+            print(f"DEBUG: Configuration sent, {len(responses)} commands processed")
             return True, responses
             
         except Exception as e:
@@ -167,14 +198,22 @@ class RadarInterface:
             # Clear input buffer before sending command
             self.cli_serial.reset_input_buffer()
             
+            # Clear data buffer before starting
+            self.data_buffer = bytearray()
+            self.frame_count = 0
+            
+            # Also clear data serial buffer
+            if self.data_serial and self.data_serial.is_open:
+                self.data_serial.reset_input_buffer()
+                
+            print("DEBUG: Sending sensorStart command...")
             self.cli_serial.write(b'sensorStart\n')
             time.sleep(0.1)
             
             # Read response with multiple attempts
             response = ""
-            max_attempts = 3
             start_time = time.time()
-            timeout = 0.2  # 200ms timeout
+            timeout = 0.5  # 500ms timeout for start command
             
             while (time.time() - start_time) < timeout:
                 if self.cli_serial.in_waiting > 0:
@@ -192,7 +231,18 @@ class RadarInterface:
             if not response or response.isspace():
                 response = "No response (timeout)"
                 
+            print(f"DEBUG: sensorStart response: {response}")
             self.is_sensor_running = True
+            
+            # Give sensor time to start sending data
+            time.sleep(0.1)
+            
+            # Check if data is coming in
+            if self.data_serial and self.data_serial.is_open:
+                time.sleep(0.1)
+                bytes_waiting = self.data_serial.in_waiting
+                print(f"DEBUG: After starting sensor, {bytes_waiting} bytes waiting on data port")
+                
             return True, response
         return False, "CLI serial port is not open"
             
@@ -243,6 +293,22 @@ class RadarInterface:
                 new_data = self.data_serial.read(bytes_available)
                 self.data_buffer.extend(new_data)
                 
+                # Debug: print buffer size periodically
+                self.frame_count += 1
+                
+                # First, just check if we're getting ANY data
+                if self.frame_count == 10:
+                    print(f"DEBUG: After 10 reads, total bytes received: {len(self.data_buffer)}")
+                    if len(self.data_buffer) == 0:
+                        print("DEBUG: No data received at all! Check:")
+                        print("  1. Is the radar powered on?")
+                        print("  2. Are the COM ports correct?")
+                        print("  3. Is the sensor actually started?")
+                
+                # Minimal buffer status - only print every 500 frames
+                if self.frame_count % 500 == 0:
+                    print(f"DEBUG: Buffer size: {len(self.data_buffer)} bytes")
+                
             # Try to parse frame from buffer
             frame_data = self._parse_frame()
             if frame_data:
@@ -250,8 +316,37 @@ class RadarInterface:
                 
         except Exception as e:
             print(f"Error reading data: {str(e)}")
+            import traceback
+            traceback.print_exc()
             
         return None
+        
+    def _find_magic_word_pattern(self):
+        """Debug function to find potential magic word patterns"""
+        # Look for common magic word patterns
+        patterns = [
+            [0x02, 0x01, 0x04, 0x03, 0x06, 0x05, 0x08, 0x07],  # Standard
+            [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],  # Sequential
+            [0x02, 0x01, 0x04, 0x03, 0x06, 0x05, 0x08, 0x07],  # TI Standard
+        ]
+        
+        for pattern in patterns:
+            pattern_str = ' '.join([f'{b:02X}' for b in pattern])
+            # Search for pattern in buffer
+            for i in range(min(len(self.data_buffer) - 8, 100)):
+                if all(self.data_buffer[i+j] == pattern[j] for j in range(8)):
+                    print(f"DEBUG: Found pattern {pattern_str} at offset {i}")
+                    break
+        
+    def _check_magic_word(self):
+        """Check if buffer starts with magic word"""
+        if len(self.data_buffer) < 8:
+            return False
+            
+        for i in range(8):
+            if self.data_buffer[i] != self.MAGIC_WORD[i]:
+                return False
+        return True
         
     def _parse_frame(self):
         """Parse a complete frame from the data buffer"""
@@ -275,8 +370,8 @@ class RadarInterface:
                             # Wait for more data
                             return None
                     else:
-                        # Invalid header, skip magic word
-                        self.data_buffer = self.data_buffer[8:]
+                        # Invalid header, skip one byte instead of magic word
+                        self.data_buffer = self.data_buffer[1:]
                 else:
                     # Wait for more data
                     return None
@@ -286,26 +381,20 @@ class RadarInterface:
                 
         return None
         
-    def _check_magic_word(self):
-        """Check if buffer starts with magic word"""
-        if len(self.data_buffer) < 8:
-            return False
-            
-        for i in range(8):
-            if self.data_buffer[i] != self.MAGIC_WORD[i]:
-                return False
-        return True
-        
     def _parse_header(self):
         """Parse message header"""
         try:
             header = {}
             idx = 0
             
+            # Check if we have enough data for complete header
+            if len(self.data_buffer) < self.MSG_HEADER_LEN:
+                return None
+            
             # Magic word (8 bytes) - already checked
             idx += 8
             
-            # Version (4 bytes)
+            # Version (4 bytes) - Don't reject based on version
             header['version'] = struct.unpack('<I', self.data_buffer[idx:idx+4])[0]
             idx += 4
             
@@ -358,6 +447,9 @@ class RadarInterface:
         # Parse TLVs
         idx = self.MSG_HEADER_LEN
         
+        # Debug: when objects are detected, show TLV info
+        tlv_debug_info = []
+        
         for i in range(header['numTLVs']):
             if idx + self.TLV_HEADER_LEN > len(frame_data):
                 break
@@ -367,21 +459,36 @@ class RadarInterface:
             tlv_length = struct.unpack('<I', frame_data[idx+4:idx+8])[0]
             idx += self.TLV_HEADER_LEN
             
-            if idx + tlv_length > len(frame_data):
+            # Collect TLV info for debug
+            tlv_debug_info.append(f"Type:{tlv_type}(len:{tlv_length})")
+                
+            # Validate TLV length
+            if tlv_length > len(frame_data) or idx + tlv_length > len(frame_data):
                 break
                 
             # Parse TLV data based on type
-            if tlv_type == self.POINT_CLOUD_TLV_TYPE:
+            if tlv_type == self.MMWDEMO_OUTPUT_MSG_DETECTED_POINTS or tlv_type == 1:
+                print(f"DEBUG: Found detected points TLV (type {tlv_type}) with {header['numDetectedObj']} objects")
                 result['pointCloud'] = self._parse_point_cloud(
                     frame_data[idx:idx+tlv_length],
                     header['numDetectedObj']
                 )
-            elif tlv_type == self.TARGET_LIST_TLV_TYPE:
-                result['targets'] = self._parse_target_list(
-                    frame_data[idx:idx+tlv_length]
-                )
+            elif tlv_type == 0 and header['numDetectedObj'] > 0:
+                # Sometimes point cloud data comes as type 0
+                # Check if the length makes sense for point cloud data
+                expected_size = header['numDetectedObj'] * 16  # 4 floats per point
+                if tlv_length >= expected_size or tlv_length == header['numDetectedObj'] * 12:
+                    print(f"DEBUG: Type 0 TLV might be point cloud data (len={tlv_length}, expected={expected_size})")
+                    result['pointCloud'] = self._parse_point_cloud(
+                        frame_data[idx:idx+tlv_length],
+                        header['numDetectedObj']
+                    )
                 
             idx += tlv_length
+        
+        # Debug: show TLV types when objects are detected    
+        if header['numDetectedObj'] > 0:
+            print(f"DEBUG: Frame {header['frameNumber']} TLVs: {', '.join(tlv_debug_info)}")
             
         return result
         
@@ -396,6 +503,7 @@ class RadarInterface:
             
             header['version'] = struct.unpack('<I', frame_data[idx:idx+4])[0]
             idx += 4
+            
             header['totalPacketLen'] = struct.unpack('<I', frame_data[idx:idx+4])[0]
             idx += 4
             header['platform'] = struct.unpack('<I', frame_data[idx:idx+4])[0]
@@ -410,29 +518,86 @@ class RadarInterface:
             idx += 4
             header['subFrameNumber'] = struct.unpack('<I', frame_data[idx:idx+4])[0]
             
+            # Only print header info when there are detected objects
+            if header['numDetectedObj'] > 0:
+                print(f"DEBUG: Frame {header['frameNumber']}: {header['numDetectedObj']} objects, {header['numTLVs']} TLVs")
+            
             return header
             
-        except:
+        except Exception as e:
+            print(f"DEBUG: Error in _parse_header_from_frame: {str(e)}")
             return None
             
     def _parse_point_cloud(self, data, num_points):
-        """Parse point cloud data"""
-        point_size = 16  # 4 floats (x, y, z, doppler) * 4 bytes
+        """Parse point cloud data - SDK 3.x format"""
         points = []
         
-        for i in range(num_points):
-            if i * point_size + point_size > len(data):
-                break
+        # Check if we have the expected data structure
+        if num_points == 0:
+            return np.array([]).reshape(0, 4)
+            
+        # Calculate expected sizes for different formats
+        # Format 1: x, y, z, doppler (4 floats = 16 bytes per point)
+        size_format1 = num_points * 16
+        # Format 2: range, azimuth, elevation, doppler (4 floats = 16 bytes per point) 
+        size_format2 = num_points * 16
+        # Format 3: x, y, z, doppler, snr (5 floats = 20 bytes per point)
+        size_format3 = num_points * 20
+        
+        # Try to determine format based on data length
+        if len(data) >= size_format3:
+            # Format with SNR
+            point_size = 20
+            for i in range(num_points):
+                if i * point_size + point_size > len(data):
+                    break
+                    
+                idx = i * point_size
+                x = struct.unpack('<f', data[idx:idx+4])[0]
+                y = struct.unpack('<f', data[idx+4:idx+8])[0]
+                z = struct.unpack('<f', data[idx+8:idx+12])[0]
+                doppler = struct.unpack('<f', data[idx+12:idx+16])[0]
+                snr = struct.unpack('<f', data[idx+16:idx+20])[0]
                 
-            idx = i * point_size
-            x = struct.unpack('<f', data[idx:idx+4])[0]
-            y = struct.unpack('<f', data[idx+4:idx+8])[0]
-            z = struct.unpack('<f', data[idx+8:idx+12])[0]
-            doppler = struct.unpack('<f', data[idx+12:idx+16])[0]
+                points.append([x, y, z, doppler])
+                
+        elif len(data) >= size_format1:
+            # Standard format
+            point_size = 16
+            for i in range(num_points):
+                if i * point_size + point_size > len(data):
+                    break
+                    
+                idx = i * point_size
+                x = struct.unpack('<f', data[idx:idx+4])[0]
+                y = struct.unpack('<f', data[idx+4:idx+8])[0]
+                z = struct.unpack('<f', data[idx+8:idx+12])[0]
+                doppler = struct.unpack('<f', data[idx+12:idx+16])[0]
+                
+                points.append([x, y, z, doppler])
+        else:
+            # Try a more compact format (range, azimuth, doppler)
+            point_size = 12
+            for i in range(num_points):
+                if i * point_size + point_size > len(data):
+                    break
+                    
+                idx = i * point_size
+                range_val = struct.unpack('<f', data[idx:idx+4])[0]
+                azimuth = struct.unpack('<f', data[idx+4:idx+8])[0]
+                doppler = struct.unpack('<f', data[idx+8:idx+12])[0]
+                
+                # Convert spherical to cartesian
+                x = range_val * np.sin(azimuth)
+                y = range_val * np.cos(azimuth)
+                z = 0.0  # No elevation data
+                
+                points.append([x, y, z, doppler])
+        
+        if len(points) > 0:
+            print(f"DEBUG: Successfully parsed {len(points)} points from {num_points} expected")
             
-            points.append([x, y, z])
-            
-        return np.array(points) if points else np.array([]).reshape(0, 3)
+        return np.array(points) if points else np.array([]).reshape(0, 4)
         
     def _parse_target_list(self, data):
         """Parse target list data"""
