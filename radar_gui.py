@@ -283,7 +283,23 @@ class RadarGUI(QMainWindow):
                         for item in response:
                             if isinstance(item, dict):
                                 self.log_status(f"CMD: {item['command']}")
-                                self.log_status(f"RSP: {item['response']}")
+                                resp_text = item['response']
+                                
+                                # Show the response
+                                if resp_text == "No response":
+                                    self.log_status("RSP: No response received")
+                                elif resp_text.startswith("Decode error:"):
+                                    self.log_status(f"RSP: {resp_text}")
+                                else:
+                                    # Show decoded response
+                                    self.log_status(f"RSP: {resp_text}")
+                                    
+                                    # If response contains non-ASCII characters, show hex
+                                    if any(ord(c) > 127 or ord(c) < 32 for c in resp_text if c not in '\n\r\t'):
+                                        hex_str = ' '.join(f'{ord(c):02X}' for c in resp_text[:50])
+                                        if len(resp_text) > 50:
+                                            hex_str += "..."
+                                        self.log_status(f"HEX: {hex_str}")
                             else:
                                 self.log_status(f"RSP: {item}")
                     else:

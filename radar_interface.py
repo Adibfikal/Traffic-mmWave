@@ -114,14 +114,44 @@ class RadarInterface:
                 if cmd.lower() == 'sensorstart':
                     continue
                     
-                self.cli_serial.write((cmd + '\n').encode())
-                time.sleep(0.01)
+                # Clear input buffer before sending command
+                self.cli_serial.reset_input_buffer()
                 
-                # Read response
-                response = self.cli_serial.read(256).decode('utf-8', errors='ignore').strip()
+                # Send command
+                self.cli_serial.write((cmd + '\n').encode())
+                time.sleep(0.05)  # Increased delay for command processing
+                
+                # Read response with multiple attempts
+                response = ""
+                max_attempts = 3
+                start_time = time.time()
+                timeout = 0.2  # 200ms timeout
+                
+                while (time.time() - start_time) < timeout:
+                    if self.cli_serial.in_waiting > 0:
+                        try:
+                            raw_data = self.cli_serial.read(self.cli_serial.in_waiting)
+                            # Try to decode as ASCII/UTF-8
+                            decoded = raw_data.decode('ascii', errors='ignore').strip()
+                            # Filter out non-printable characters except newlines, tabs
+                            filtered = ''.join(char for char in decoded if char.isprintable() or char in '\n\r\t')
+                            response += filtered
+                            
+                            # Check if we got a complete response (ends with prompt or Done)
+                            if response and ('>' in response or 'Done' in response or '\n' in response):
+                                break
+                        except Exception as e:
+                            response = f"Decode error: {str(e)}"
+                            break
+                    time.sleep(0.01)  # Small delay to avoid busy waiting
+                
+                # Clean up the response
+                response = response.strip()
+                
                 responses.append({'command': cmd, 'response': response})
                 
-                if 'Error' in response:
+                # Check for error in response
+                if 'Error' in response or 'error' in response.lower():
                     print(f"Error in command: {cmd}")
                     return False, responses
                     
@@ -134,9 +164,34 @@ class RadarInterface:
     def start_sensor(self):
         """Start the sensor"""
         if self.cli_serial and self.cli_serial.is_open:
+            # Clear input buffer before sending command
+            self.cli_serial.reset_input_buffer()
+            
             self.cli_serial.write(b'sensorStart\n')
             time.sleep(0.1)
-            response = self.cli_serial.read(256).decode('utf-8', errors='ignore').strip()
+            
+            # Read response with multiple attempts
+            response = ""
+            max_attempts = 3
+            start_time = time.time()
+            timeout = 0.2  # 200ms timeout
+            
+            while (time.time() - start_time) < timeout:
+                if self.cli_serial.in_waiting > 0:
+                    try:
+                        raw_data = self.cli_serial.read(self.cli_serial.in_waiting)
+                        decoded = raw_data.decode('ascii', errors='ignore').strip()
+                        filtered = ''.join(char for char in decoded if char.isprintable() or char in '\n\r\t')
+                        response += filtered
+                        if response and not response.isspace():
+                            break
+                    except Exception as e:
+                        response = f"Decode error: {str(e)}"
+                time.sleep(0.01)  # Small delay to avoid busy waiting
+            
+            if not response or response.isspace():
+                response = "No response (timeout)"
+                
             self.is_sensor_running = True
             return True, response
         return False, "CLI serial port is not open"
@@ -144,9 +199,34 @@ class RadarInterface:
     def stop_sensor(self):
         """Stop the sensor"""
         if self.cli_serial and self.cli_serial.is_open:
+            # Clear input buffer before sending command
+            self.cli_serial.reset_input_buffer()
+            
             self.cli_serial.write(b'sensorStop\n')
             time.sleep(0.1)
-            response = self.cli_serial.read(256).decode('utf-8', errors='ignore').strip()
+            
+            # Read response with multiple attempts
+            response = ""
+            max_attempts = 3
+            start_time = time.time()
+            timeout = 0.2  # 200ms timeout
+            
+            while (time.time() - start_time) < timeout:
+                if self.cli_serial.in_waiting > 0:
+                    try:
+                        raw_data = self.cli_serial.read(self.cli_serial.in_waiting)
+                        decoded = raw_data.decode('ascii', errors='ignore').strip()
+                        filtered = ''.join(char for char in decoded if char.isprintable() or char in '\n\r\t')
+                        response += filtered
+                        if response and not response.isspace():
+                            break
+                    except Exception as e:
+                        response = f"Decode error: {str(e)}"
+                time.sleep(0.01)  # Small delay to avoid busy waiting
+            
+            if not response or response.isspace():
+                response = "No response (timeout)"
+                
             self.is_sensor_running = False
             return True, response
         return False, "CLI serial port is not open"
