@@ -69,6 +69,9 @@ class RadarGUI(QMainWindow):
         self.object_trails = {}  # Store trails for each tracked object
         self.max_trail_length = 50
         
+        # Display mode state - True for point cloud, False for tracked targets
+        self.show_point_cloud_mode = True
+        
         # Setup UI
         self.setup_ui()
         
@@ -137,6 +140,13 @@ class RadarGUI(QMainWindow):
         self.debug_checkbox.setCheckable(True)
         self.debug_checkbox.toggled.connect(self.toggle_debug_mode)
         button_layout.addWidget(self.debug_checkbox)
+        
+        # Display mode toggle
+        self.display_mode_btn = QPushButton("Mode: Point Cloud")
+        self.display_mode_btn.setCheckable(True)
+        self.display_mode_btn.setChecked(True)  # Start with point cloud mode
+        self.display_mode_btn.toggled.connect(self.toggle_display_mode)
+        button_layout.addWidget(self.display_mode_btn)
         
         layout.addLayout(button_layout)
         
@@ -333,6 +343,17 @@ class RadarGUI(QMainWindow):
             self.debug_checkbox.setText("Debug Mode: OFF")
             self.log_status("Debug mode disabled")
             print("\n=== Point Cloud Debug Mode Disabled ===\n")
+    
+    def toggle_display_mode(self, checked):
+        """Toggle between point cloud and tracked targets display"""
+        if checked:
+            self.show_point_cloud_mode = True
+            self.display_mode_btn.setText("Mode: Point Cloud")
+            self.log_status("Display mode: Point Cloud only")
+        else:
+            self.show_point_cloud_mode = False
+            self.display_mode_btn.setText("Mode: Tracked Targets")
+            self.log_status("Display mode: Tracked Targets only")
                 
     @pyqtSlot(dict)
     def update_data(self, data):
@@ -378,8 +399,12 @@ class RadarGUI(QMainWindow):
             
             # Update statistics
             num_points = len(self.point_cloud_data) if self.point_cloud_data is not None else 0
-            self.points_label.setText(f"Points: {num_points}")
-            self.objects_label.setText(f"Tracked Objects: {len(self.tracked_objects)}")
+            if self.show_point_cloud_mode:
+                self.points_label.setText(f"Points: {num_points} (displayed)")
+                self.objects_label.setText(f"Tracked Objects: {len(self.tracked_objects)} (hidden)")
+            else:
+                self.points_label.setText(f"Points: {num_points} (hidden)")
+                self.objects_label.setText(f"Tracked Objects: {len(self.tracked_objects)} (displayed)")
             
     def update_trails(self):
         """Update trail history for tracked objects"""
@@ -400,8 +425,8 @@ class RadarGUI(QMainWindow):
             
     def update_visualization(self):
         """Update both 3D and 2D visualizations"""
-        # Update 3D point cloud
-        if self.point_cloud_data is not None and len(self.point_cloud_data) > 0:
+        # Update 3D point cloud - only show if in point cloud mode
+        if self.show_point_cloud_mode and self.point_cloud_data is not None and len(self.point_cloud_data) > 0:
             # Extract only x,y,z for 3D visualization
             if self.point_cloud_data.shape[1] >= 3:
                 points_3d = self.point_cloud_data[:, :3]
@@ -414,98 +439,127 @@ class RadarGUI(QMainWindow):
             x_points = points_3d[:, 0]
             y_points = points_3d[:, 1]
             self.point_scatter_2d.setData(x_points, y_points)
+        elif not self.show_point_cloud_mode:
+            # Hide point cloud data when in tracked targets mode
+            self.point_scatter.setData(pos=np.array([[0, 0, 0]]))
+            self.point_scatter_2d.setData([], [])
         
-        # Update tracked objects and trails
-        current_ids = set(self.tracked_objects.keys())
-        existing_ids = set(self.object_scatters.keys())
-        
-        # Remove visualizations for objects that no longer exist
-        for obj_id in existing_ids - current_ids:
-            # Remove from 3D view
-            if obj_id in self.object_scatters:
-                self.plot_widget.removeItem(self.object_scatters[obj_id])
-                del self.object_scatters[obj_id]
-                
-            if obj_id in self.trail_lines:
-                self.plot_widget.removeItem(self.trail_lines[obj_id])
-                del self.trail_lines[obj_id]
-                
-            # Remove from 2D view
-            if obj_id in self.object_scatters_2d:
-                self.plot_2d.removeItem(self.object_scatters_2d[obj_id])
-                del self.object_scatters_2d[obj_id]
-                
-            if obj_id in self.trail_lines_2d:
-                self.plot_2d.removeItem(self.trail_lines_2d[obj_id])
-                del self.trail_lines_2d[obj_id]
-        
-        # Update or create visualizations for current objects
-        for obj_id, obj_data in self.tracked_objects.items():
-            color = self.get_object_color(obj_id)
-            color_rgb = [int(c * 255) for c in color]
+        # Update tracked objects and trails - only show if in tracked targets mode
+        if not self.show_point_cloud_mode:
+            current_ids = set(self.tracked_objects.keys())
+            existing_ids = set(self.object_scatters.keys())
             
-            # === Update 3D visualization ===
-            if obj_id not in self.object_scatters:
-                scatter = gl.GLScatterPlotItem(
-                    pos=np.array([obj_data['position']]),
-                    color=color + (1,),
-                    size=0.5
-                )
-                self.plot_widget.addItem(scatter)
-                self.object_scatters[obj_id] = scatter
-            else:
-                self.object_scatters[obj_id].setData(
-                    pos=np.array([obj_data['position']])
-                )
-            
-            # Update 3D trail
-            if obj_id in self.object_trails and len(self.object_trails[obj_id]) > 1:
-                trail_points = np.array(list(self.object_trails[obj_id]))
-                
-                if obj_id not in self.trail_lines:
-                    line = gl.GLLinePlotItem(
-                        pos=trail_points,
-                        color=color + (0.5,),
-                        width=2,
-                        antialias=True
-                    )
-                    self.plot_widget.addItem(line)
-                    self.trail_lines[obj_id] = line
-                else:
-                    self.trail_lines[obj_id].setData(pos=trail_points)
+            # Remove visualizations for objects that no longer exist
+            for obj_id in existing_ids - current_ids:
+                # Remove from 3D view
+                if obj_id in self.object_scatters:
+                    self.plot_widget.removeItem(self.object_scatters[obj_id])
+                    del self.object_scatters[obj_id]
                     
-            # === Update 2D visualization ===
-            obj_x = obj_data['position'][0]
-            obj_y = obj_data['position'][1]
+                if obj_id in self.trail_lines:
+                    self.plot_widget.removeItem(self.trail_lines[obj_id])
+                    del self.trail_lines[obj_id]
+                    
+                # Remove from 2D view
+                if obj_id in self.object_scatters_2d:
+                    self.plot_2d.removeItem(self.object_scatters_2d[obj_id])
+                    del self.object_scatters_2d[obj_id]
+                    
+                if obj_id in self.trail_lines_2d:
+                    self.plot_2d.removeItem(self.trail_lines_2d[obj_id])
+                    del self.trail_lines_2d[obj_id]
             
-            # Update 2D object position
-            if obj_id not in self.object_scatters_2d:
-                scatter_2d = pg.ScatterPlotItem(
-                    [obj_x], [obj_y],
-                    pen=pg.mkPen(color=color_rgb, width=2),
-                    brush=pg.mkBrush(color_rgb + [255]),
-                    size=10,
-                    symbol='o'
-                )
-                self.plot_2d.addItem(scatter_2d)
-                self.object_scatters_2d[obj_id] = scatter_2d
-            else:
-                self.object_scatters_2d[obj_id].setData([obj_x], [obj_y])
-            
-            # Update 2D trail
-            if obj_id in self.object_trails and len(self.object_trails[obj_id]) > 1:
-                trail_points = np.array(list(self.object_trails[obj_id]))
-                trail_x = trail_points[:, 0]
-                trail_y = trail_points[:, 1]
+            # Update or create visualizations for current objects
+            for obj_id, obj_data in self.tracked_objects.items():
+                color = self.get_object_color(obj_id)
+                color_rgb = [int(c * 255) for c in color]
                 
-                if obj_id not in self.trail_lines_2d:
-                    line_2d = self.plot_2d.plot(
-                        trail_x, trail_y,
-                        pen=pg.mkPen(color=color_rgb + [128], width=2)
+                # === Update 3D visualization ===
+                if obj_id not in self.object_scatters:
+                    scatter = gl.GLScatterPlotItem(
+                        pos=np.array([obj_data['position']]),
+                        color=color + (1,),
+                        size=0.5
                     )
-                    self.trail_lines_2d[obj_id] = line_2d
+                    self.plot_widget.addItem(scatter)
+                    self.object_scatters[obj_id] = scatter
                 else:
-                    self.trail_lines_2d[obj_id].setData(trail_x, trail_y)
+                    self.object_scatters[obj_id].setData(
+                        pos=np.array([obj_data['position']])
+                    )
+                
+                # Update 3D trail
+                if obj_id in self.object_trails and len(self.object_trails[obj_id]) > 1:
+                    trail_points = np.array(list(self.object_trails[obj_id]))
+                    
+                    if obj_id not in self.trail_lines:
+                        line = gl.GLLinePlotItem(
+                            pos=trail_points,
+                            color=color + (0.5,),
+                            width=2,
+                            antialias=True
+                        )
+                        self.plot_widget.addItem(line)
+                        self.trail_lines[obj_id] = line
+                    else:
+                        self.trail_lines[obj_id].setData(pos=trail_points)
+                        
+                # === Update 2D visualization ===
+                obj_x = obj_data['position'][0]
+                obj_y = obj_data['position'][1]
+                
+                # Update 2D object position
+                if obj_id not in self.object_scatters_2d:
+                    scatter_2d = pg.ScatterPlotItem(
+                        [obj_x], [obj_y],
+                        pen=pg.mkPen(color=color_rgb, width=2),
+                        brush=pg.mkBrush(color_rgb + [255]),
+                        size=10,
+                        symbol='o'
+                    )
+                    self.plot_2d.addItem(scatter_2d)
+                    self.object_scatters_2d[obj_id] = scatter_2d
+                else:
+                    self.object_scatters_2d[obj_id].setData([obj_x], [obj_y])
+                
+                # Update 2D trail
+                if obj_id in self.object_trails and len(self.object_trails[obj_id]) > 1:
+                    trail_points = np.array(list(self.object_trails[obj_id]))
+                    trail_x = trail_points[:, 0]
+                    trail_y = trail_points[:, 1]
+                    
+                    if obj_id not in self.trail_lines_2d:
+                        line_2d = self.plot_2d.plot(
+                            trail_x, trail_y,
+                            pen=pg.mkPen(color=color_rgb + [128], width=2)
+                        )
+                        self.trail_lines_2d[obj_id] = line_2d
+                    else:
+                        self.trail_lines_2d[obj_id].setData(trail_x, trail_y)
+        else:
+            # Hide tracked objects when in point cloud mode
+            current_ids = set(self.tracked_objects.keys())
+            existing_ids = set(self.object_scatters.keys())
+            
+            # Hide all tracked object visualizations
+            for obj_id in existing_ids:
+                # Hide from 3D view
+                if obj_id in self.object_scatters:
+                    self.plot_widget.removeItem(self.object_scatters[obj_id])
+                    del self.object_scatters[obj_id]
+                    
+                if obj_id in self.trail_lines:
+                    self.plot_widget.removeItem(self.trail_lines[obj_id])
+                    del self.trail_lines[obj_id]
+                    
+                # Hide from 2D view
+                if obj_id in self.object_scatters_2d:
+                    self.plot_2d.removeItem(self.object_scatters_2d[obj_id])
+                    del self.object_scatters_2d[obj_id]
+                    
+                if obj_id in self.trail_lines_2d:
+                    self.plot_2d.removeItem(self.trail_lines_2d[obj_id])
+                    del self.trail_lines_2d[obj_id]
                     
     def get_object_color(self, obj_id):
         """Get a consistent color for an object based on its ID"""
