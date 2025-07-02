@@ -4,4 +4,5 @@ pyserial>=3.5
 numpy>=1.19.0
 scikit-learn>=0.24.0
 filterpy>=1.4.5
-PyOpenGL>=3.1.0 
+PyOpenGL>=3.1.0
+opencv-python>=4.5.0 

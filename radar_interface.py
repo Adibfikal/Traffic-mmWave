@@ -297,17 +297,17 @@ class RadarInterface:
                 self.frame_count += 1
                 
                 # First, just check if we're getting ANY data
-                if self.frame_count == 10:
-                    print(f"DEBUG: After 10 reads, total bytes received: {len(self.data_buffer)}")
-                    if len(self.data_buffer) == 0:
-                        print("DEBUG: No data received at all! Check:")
-                        print("  1. Is the radar powered on?")
-                        print("  2. Are the COM ports correct?")
-                        print("  3. Is the sensor actually started?")
+                # if self.frame_count == 10:
+                #     print(f"DEBUG: After 10 reads, total bytes received: {len(self.data_buffer)}")
+                #     if len(self.data_buffer) == 0:
+                #         print("DEBUG: No data received at all! Check:")
+                #         print("  1. Is the radar powered on?")
+                #         print("  2. Are the COM ports correct?")
+                #         print("  3. Is the sensor actually started?")
                 
-                # Minimal buffer status - only print every 500 frames
-                if self.frame_count % 500 == 0:
-                    print(f"DEBUG: Buffer size: {len(self.data_buffer)} bytes")
+                # # Minimal buffer status - only print every 500 frames
+                # if self.frame_count % 500 == 0:
+                #     print(f"DEBUG: Buffer size: {len(self.data_buffer)} bytes")
                 
             # Try to parse frame from buffer
             frame_data = self._parse_frame()
@@ -468,7 +468,7 @@ class RadarInterface:
                 
             # Parse TLV data based on type
             if tlv_type == self.MMWDEMO_OUTPUT_MSG_DETECTED_POINTS or tlv_type == 1:
-                print(f"DEBUG: Found detected points TLV (type {tlv_type}) with {header['numDetectedObj']} objects")
+                # print(f"DEBUG: Found detected points TLV (type {tlv_type}) with {header['numDetectedObj']} objects")
                 result['pointCloud'] = self._parse_point_cloud(
                     frame_data[idx:idx+tlv_length],
                     header['numDetectedObj']
@@ -478,7 +478,7 @@ class RadarInterface:
                 # Check if the length makes sense for point cloud data
                 expected_size = header['numDetectedObj'] * 16  # 4 floats per point
                 if tlv_length >= expected_size or tlv_length == header['numDetectedObj'] * 12:
-                    print(f"DEBUG: Type 0 TLV might be point cloud data (len={tlv_length}, expected={expected_size})")
+                    # print(f"DEBUG: Type 0 TLV might be point cloud data (len={tlv_length}, expected={expected_size})")
                     result['pointCloud'] = self._parse_point_cloud(
                         frame_data[idx:idx+tlv_length],
                         header['numDetectedObj']
@@ -487,8 +487,8 @@ class RadarInterface:
             idx += tlv_length
         
         # Debug: show TLV types when objects are detected    
-        if header['numDetectedObj'] > 0:
-            print(f"DEBUG: Frame {header['frameNumber']} TLVs: {', '.join(tlv_debug_info)}")
+        # if header['numDetectedObj'] > 0:
+            # print(f"DEBUG: Frame {header['frameNumber']} TLVs: {', '.join(tlv_debug_info)}")
             
         return result
         
@@ -594,8 +594,8 @@ class RadarInterface:
                 
                 points.append([x, y, z, doppler])
         
-        if len(points) > 0:
-            print(f"DEBUG: Successfully parsed {len(points)} points from {num_points} expected")
+        # if len(points) > 0:
+        #     print(f"DEBUG: Successfully parsed {len(points)} points from {num_points} expected")
             
         return np.array(points) if points else np.array([]).reshape(0, 4)
         
