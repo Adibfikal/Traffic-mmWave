@@ -10,6 +10,7 @@ import pyqtgraph.opengl as gl
 from collections import deque
 import time
 import cv2
+import os
 
 from radar_interface import RadarInterface
 from tracking import ObjectTracker
@@ -29,17 +30,49 @@ class WebcamThread(QThread):
         """Initialize camera with specified index"""
         try:
             self.camera_index = camera_index
-            self.camera = cv2.VideoCapture(camera_index)
             
-            if not self.camera.isOpened():
-                raise Exception(f"Cannot open camera {camera_index}")
+            # Try different backends for external cameras (Windows)
+            backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
+            
+            for backend in backends:
+                try:
+                    self.camera = cv2.VideoCapture(camera_index, backend)
+                    
+                    if not self.camera.isOpened():
+                        if self.camera:
+                            self.camera.release()
+                        continue
+                        
+                    # Set camera properties for better performance
+                    self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                    self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                    self.camera.set(cv2.CAP_PROP_FPS, 30)
+                    self.camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer lag
+                    
+                    # Test if we can actually read frames
+                    ret, frame = self.camera.read()
+                    if ret and frame is not None:
+                        backend_name = {
+                            cv2.CAP_DSHOW: "DirectShow",
+                            cv2.CAP_MSMF: "Microsoft Media Foundation", 
+                            cv2.CAP_ANY: "Default"
+                        }.get(backend, f"Backend {backend}")
+                        
+                        self.error_occurred.emit(f"Camera {camera_index} connected using {backend_name}")
+                        return True
+                    else:
+                        # Can't read frames, try next backend
+                        self.camera.release()
+                        continue
+                        
+                except Exception as e:
+                    if self.camera:
+                        self.camera.release()
+                    continue
+            
+            # If we get here, all backends failed
+            raise Exception(f"Cannot access camera {camera_index} with any backend. Camera may be in use by another application.")
                 
-            # Set camera properties for better performance
-            self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            self.camera.set(cv2.CAP_PROP_FPS, 30)
-            
-            return True
         except Exception as e:
             self.error_occurred.emit(f"Failed to setup camera: {str(e)}")
             return False
@@ -150,25 +183,108 @@ class RadarGUI(QMainWindow):
     def scan_available_cameras(self):
         """Scan for available cameras and return a list of camera indices and names"""
         available_cameras = []
+        consecutive_failures = 0
+        max_consecutive_failures = 2  # Stop after 2 consecutive failures
         
-        # Test camera indices from 0 to 10 (most systems won't have more than this)
-        for i in range(11):
-            cap = cv2.VideoCapture(i)
-            if cap.isOpened():
-                # Try to read a frame to confirm the camera works
-                ret, _ = cap.read()
-                if ret:
-                    # Get camera name/description if possible
-                    width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-                    height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-                    fps = cap.get(cv2.CAP_PROP_FPS)
-                    
-                    camera_name = f"Camera {i} ({int(width)}x{int(height)})"
-                    available_cameras.append((i, camera_name))
-                cap.release()
+        # Suppress OpenCV error messages temporarily
+        old_opencv_log_level = os.environ.get('OPENCV_LOG_LEVEL', '')
+        os.environ['OPENCV_LOG_LEVEL'] = 'FATAL'
+        
+        try:
+            # Test camera indices starting from 0
+            for i in range(10):  # Maximum 10 cameras
+                camera_found = False
+                
+                # Update status for user feedback
+                self.log_status(f"Testing camera {i}...")
+                QApplication.processEvents()  # Keep UI responsive
+                
+                # Try different backends for better compatibility
+                backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
+                
+                for backend in backends:
+                    cap = None
+                    try:
+                        cap = cv2.VideoCapture(i, backend)
+                        # Optimized settings for faster detection
+                        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 300)  # Shorter timeout
+                        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)   # Lower resolution for testing
+                        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+                        
+                        if cap.isOpened():
+                            # Try to read a frame to confirm the camera works
+                            ret, _ = cap.read()
+                            if ret:
+                                # Get actual camera resolution (after successful test)
+                                width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+                                height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+                                
+                                backend_name = {
+                                    cv2.CAP_DSHOW: "DS",
+                                    cv2.CAP_MSMF: "MSMF", 
+                                    cv2.CAP_ANY: "Default"
+                                }.get(backend, "Unknown")
+                                
+                                camera_name = f"Camera {i} ({int(width)}x{int(height)}, {backend_name})"
+                                available_cameras.append((i, camera_name))
+                                camera_found = True
+                                consecutive_failures = 0  # Reset failure counter
+                                self.log_status(f"✓ Found: {camera_name}")
+                                break  # Found working backend, stop trying others
+                                
+                    except Exception as e:
+                        # Continue to next backend
+                        pass
+                    finally:
+                        if cap is not None:
+                            cap.release()
+                
+                # Track consecutive failures to know when to stop
+                if not camera_found:
+                    consecutive_failures += 1
+                    if consecutive_failures >= max_consecutive_failures:
+                        # Stop scanning after consecutive failures
+                        self.log_status(f"Stopping scan after {max_consecutive_failures} consecutive failures")
+                        break
+                        
+        finally:
+            # Restore original OpenCV log level
+            if old_opencv_log_level:
+                os.environ['OPENCV_LOG_LEVEL'] = old_opencv_log_level
+            else:
+                os.environ.pop('OPENCV_LOG_LEVEL', None)
                 
         return available_cameras
         
+    def refresh_camera_list(self):
+        """Refresh the camera dropdown with available cameras"""
+        # Show scanning status
+        self.refresh_cameras_btn.setText("Scanning...")
+        self.refresh_cameras_btn.setEnabled(False)
+        self.camera_dropdown.clear()
+        self.camera_dropdown.addItem("Scanning for cameras...", -1)
+        
+        # Force UI update
+        QApplication.processEvents()
+        
+        # Scan for available cameras
+        cameras = self.scan_available_cameras()
+        
+        # Clear scanning indicator
+        self.camera_dropdown.clear()
+        
+        if cameras:
+            for camera_index, camera_name in cameras:
+                self.camera_dropdown.addItem(camera_name, camera_index)
+            self.log_status(f"Found {len(cameras)} camera(s)")
+        else:
+            self.camera_dropdown.addItem("No cameras found", -1)
+            self.log_status("No cameras detected")
+        
+        # Restore button
+        self.refresh_cameras_btn.setText("Refresh Cameras")
+        self.refresh_cameras_btn.setEnabled(True)
+            
     def setup_ui(self):
         """Setup the user interface"""
         central_widget = QWidget()
@@ -207,13 +323,19 @@ class RadarGUI(QMainWindow):
         webcam_group = QGroupBox("Webcam Configuration")
         webcam_layout = QGridLayout()
         
-        webcam_layout.addWidget(QLabel("Camera Index:"), 0, 0)
-        self.camera_index_input = QLineEdit("0")
-        webcam_layout.addWidget(self.camera_index_input, 0, 1)
+        webcam_layout.addWidget(QLabel("Camera Selection:"), 0, 0)
+        self.camera_dropdown = QComboBox()
+        self.camera_dropdown.setMinimumWidth(200)
+        webcam_layout.addWidget(self.camera_dropdown, 0, 1)
+        
+        # Refresh cameras button
+        self.refresh_cameras_btn = QPushButton("Refresh Cameras")
+        self.refresh_cameras_btn.clicked.connect(self.refresh_camera_list)
+        webcam_layout.addWidget(self.refresh_cameras_btn, 0, 2)
         
         self.webcam_btn = QPushButton("Start Webcam")
         self.webcam_btn.clicked.connect(self.toggle_webcam)
-        webcam_layout.addWidget(self.webcam_btn, 1, 0, 1, 2)
+        webcam_layout.addWidget(self.webcam_btn, 1, 0, 1, 3)
         
         webcam_group.setLayout(webcam_layout)
         layout.addWidget(webcam_group)
@@ -554,17 +676,20 @@ class RadarGUI(QMainWindow):
     def toggle_webcam(self):
         """Start or stop webcam capture"""
         if self.webcam_btn.text() == "Start Webcam":
-            try:
-                camera_index = int(self.camera_index_input.text())
-                if self.webcam_thread.setup_camera(camera_index):
-                    self.webcam_thread.start()
-                    self.webcam_btn.setText("Stop Webcam")
-                    self.webcam_status_label.setText("Webcam: Connected")
-                    self.log_status(f"Webcam started (Camera {camera_index})")
-                else:
-                    self.log_status("Failed to start webcam")
-            except ValueError:
-                self.log_status("Invalid camera index")
+            # Get camera index from dropdown data
+            camera_index = self.camera_dropdown.currentData()
+            
+            if camera_index is None or camera_index == -1:
+                self.log_status("No valid camera selected")
+                return
+                
+            if self.webcam_thread.setup_camera(camera_index):
+                self.webcam_thread.start()
+                self.webcam_btn.setText("Stop Webcam")
+                self.webcam_status_label.setText("Webcam: Connected")
+                self.log_status(f"Webcam started ({self.camera_dropdown.currentText()})")
+            else:
+                self.log_status("Failed to start webcam")
         else:
             self.webcam_thread.stop()
             self.webcam_btn.setText("Start Webcam")

@@ -5,3 +5,4 @@ test_cli_responses.py
 test_ports.py
 test_with_config.py
 list_ports.py
+replay_example.json
