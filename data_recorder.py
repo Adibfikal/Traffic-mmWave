@@ -143,6 +143,11 @@ class DataRecorder:
         if not self.is_recording or self.recording_mode not in ["pointcloud", "both"]:
             return
         
+        num_points = radar_data.get('numDetectedPoints', 0) or 0
+        if num_points > 0:  # Only log when we have actual data
+            if self.frame_count % 20 == 0:  # Reduce frequency
+                print(f"DEBUG: Recording radar frame {self.frame_count + 1} with {num_points} points")
+        
         # Format frame data with timestamp
         frame_entry = {
             "timestamp": time.time() * 1000,  # milliseconds
@@ -199,9 +204,21 @@ class DataRecorder:
                 
                 self.video_writer.write(frame_bgr)
     
-    def _format_point_cloud(self, point_cloud: List[List[float]]) -> List[List[float]]:
+    def _format_point_cloud(self, point_cloud: Any) -> List[List[float]]:
         """Format point cloud data to match replay format"""
-        if not point_cloud:
+        # Handle both numpy arrays and lists
+        if point_cloud is None:
+            return []
+        
+        # Convert numpy array to list if needed
+        if hasattr(point_cloud, 'tolist'):
+            point_cloud = point_cloud.tolist()
+        
+        # Check if empty after conversion
+        try:
+            if len(point_cloud) == 0:
+                return []
+        except (TypeError, AttributeError):
             return []
         
         formatted_points = []

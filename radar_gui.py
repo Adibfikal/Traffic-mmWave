@@ -500,30 +500,47 @@ class RadarGUI(QMainWindow):
         
         # === 2D Bird's Eye View ===
         self.plot_2d = pg.PlotWidget()
-        self.plot_2d.setLabel('left', 'Y Distance', units='m')
-        self.plot_2d.setLabel('bottom', 'X Distance', units='m')
+        self.plot_2d.setLabel('left', 'Y Distance (Forward)', units='m')
+        self.plot_2d.setLabel('bottom', 'X Distance (Left/Right)', units='m')
         self.plot_2d.setTitle("Bird's Eye View (2D)")
         self.plot_2d.setAspectLocked(True)
         self.plot_2d.showGrid(x=True, y=True)
         
-        # Set range with y starting at 0
-        self.plot_2d.setXRange(-10, 10)
-        self.plot_2d.setYRange(0, 50)
+        # Disable auto-range to maintain our coordinate system
+        self.plot_2d.enableAutoRange(False)
+        self.plot_2d.setMouseEnabled(x=True, y=True)  # Allow manual zoom/pan
         
-        # Add origin marker
-        origin = pg.ScatterPlotItem([0], [0], pen='w', brush='w', size=10, symbol='o')
-        self.plot_2d.addItem(origin)
+        # Set range with origin centered at bottom
+        self.plot_2d.setXRange(-15, 15)
+        self.plot_2d.setYRange(-2, 50)
+        
+        # Add origin marker with better visibility
+        self.origin_marker = pg.ScatterPlotItem(
+            [0], [0], 
+            pen=pg.mkPen('red', width=3), 
+            brush=pg.mkBrush('red'), 
+            size=20, 
+            symbol='+'
+        )
+        self.plot_2d.addItem(self.origin_marker)
+        
+        # Add crosshairs at origin for better reference
+        # Vertical line at x=0
+        self.v_line = pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen('red', width=2, style=pg.QtCore.Qt.PenStyle.DashLine))
+        self.plot_2d.addItem(self.v_line)
+        
+        # Horizontal line at y=0
+        self.h_line = pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen('red', width=2, style=pg.QtCore.Qt.PenStyle.DashLine))
+        self.plot_2d.addItem(self.h_line)
         
         # Create scatter plot for 2D point cloud
         self.point_scatter_2d = pg.ScatterPlotItem(
             [], [], 
             pen=None, 
-            brush=(255, 255, 255, 100),
-            size=5
+            brush=(255, 255, 255, 150),  # Slightly more opaque
+            size=8  # Larger points for better visibility
         )
         self.plot_2d.addItem(self.point_scatter_2d)
-        
-
         
         # Add both widgets to splitter
         splitter.addWidget(self.plot_widget)
@@ -561,23 +578,36 @@ class RadarGUI(QMainWindow):
         
         # Create a smaller 2D plot for combined view
         self.plot_2d_combined = pg.PlotWidget()
-        self.plot_2d_combined.setLabel('left', 'Y Distance', units='m')
-        self.plot_2d_combined.setLabel('bottom', 'X Distance', units='m')
+        self.plot_2d_combined.setLabel('left', 'Y Distance (Forward)', units='m')
+        self.plot_2d_combined.setLabel('bottom', 'X Distance (Left/Right)', units='m')
         self.plot_2d_combined.setAspectLocked(True)
         self.plot_2d_combined.showGrid(x=True, y=True)
-        self.plot_2d_combined.setXRange(-10, 10)
-        self.plot_2d_combined.setYRange(0, 50)
+        self.plot_2d_combined.setXRange(-15, 15)
+        self.plot_2d_combined.setYRange(-2, 50)  # Allow small negative Y to see origin clearly
         
-        # Add origin marker for combined view
-        origin_combined = pg.ScatterPlotItem([0], [0], pen='w', brush='w', size=10, symbol='o')
-        self.plot_2d_combined.addItem(origin_combined)
+        # Add origin marker for combined view with better visibility
+        self.origin_marker_combined = pg.ScatterPlotItem(
+            [0], [0], 
+            pen=pg.mkPen('red', width=2), 
+            brush=pg.mkBrush('red'), 
+            size=12, 
+            symbol='+'
+        )
+        self.plot_2d_combined.addItem(self.origin_marker_combined)
+        
+        # Add crosshairs at origin for combined view
+        self.v_line_combined = pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen('red', width=1, style=pg.QtCore.Qt.PenStyle.DashLine))
+        self.plot_2d_combined.addItem(self.v_line_combined)
+        
+        self.h_line_combined = pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen('red', width=1, style=pg.QtCore.Qt.PenStyle.DashLine))
+        self.plot_2d_combined.addItem(self.h_line_combined)
         
         # Create scatter plot for combined 2D view
         self.point_scatter_2d_combined = pg.ScatterPlotItem(
             [], [], 
             pen=None, 
-            brush=(255, 255, 255, 100),
-            size=5
+            brush=(255, 255, 255, 150),  # Slightly more opaque
+            size=6  # Slightly smaller for combined view
         )
         self.plot_2d_combined.addItem(self.point_scatter_2d_combined)
         
@@ -799,8 +829,33 @@ class RadarGUI(QMainWindow):
     @Slot(dict)
     def update_data(self, data):
         """Update with new radar data"""
+        
+        # DEBUG: Log all received data to understand what's happening
+        frame_num = data.get('header', {}).get('frameNumber', 'Unknown')
+        pointcloud_data = data.get('pointCloud', [])
+        # Handle both numpy arrays and lists properly
+        if pointcloud_data is not None:
+            if hasattr(pointcloud_data, 'shape'):  # numpy array
+                num_points = pointcloud_data.shape[0]
+            else:  # list
+                num_points = len(pointcloud_data)
+        else:
+            num_points = 0
+        
+        # DEBUG: Always log frame reception during recording
+        if self.data_recorder.is_recording:
+            if num_points > 0:  # Only log frames with actual data during recording
+                print(f"DEBUG: [RECORDING] Received frame {frame_num} with {num_points} points")
+        
+        # Log frames with point cloud data for monitoring
+        if num_points > 0:
+            pass  # Removed verbose logging
+        
         # Record radar data if recording is active
         if self.data_recorder.is_recording:
+            if num_points > 0:  # Only log when we have data to record
+                print(f"DEBUG: [RECORDING] Processing frame {frame_num} with {num_points} points")
+            
             # Format data for recording
             radar_data = {
                 "error": 0,
@@ -811,11 +866,21 @@ class RadarGUI(QMainWindow):
                 "trackData": [],
                 "trackIndexes": []
             }
+            
             self.data_recorder.add_radar_frame(radar_data)
+            
+            # Log recording stats periodically
+            stats = self.data_recorder.get_recording_stats()
+            if stats['frame_count'] % 20 == 0:  # Every 20 frames
+                print(f"DEBUG: [RECORDING] Stats - {stats['frame_count']} total frames, {stats['radar_frames']} radar frames")
         
         # Extract point cloud
         if 'pointCloud' in data:
-            self.point_cloud_data = data['pointCloud']
+            # Ensure point cloud data is a numpy array for consistent handling
+            if data['pointCloud'] is not None and len(data['pointCloud']) > 0:
+                self.point_cloud_data = np.array(data['pointCloud'])
+            else:
+                self.point_cloud_data = None
             
             # Debug mode: print point cloud data to terminal
             if self.debug_checkbox.isChecked() and self.point_cloud_data is not None and len(self.point_cloud_data) > 0:
@@ -872,39 +937,58 @@ class RadarGUI(QMainWindow):
             
         # Update 3D and 2D point cloud visualization
         if self.point_cloud_data is not None and len(self.point_cloud_data) > 0:
-            # Extract only x,y,z for 3D visualization
-            if self.point_cloud_data.shape[1] >= 3:
-                points_3d = self.point_cloud_data[:, :3]
+            # Convert to numpy array if it's a list (handles both live and playback data)
+            if not isinstance(self.point_cloud_data, np.ndarray):
+                points_array = np.array(self.point_cloud_data)
             else:
-                points_3d = self.point_cloud_data
+                points_array = self.point_cloud_data
+            
+            # Extract only x,y,z for 3D visualization
+            if len(points_array.shape) >= 2 and points_array.shape[1] >= 3:
+                points_3d = points_array[:, :3]
+            elif len(points_array.shape) >= 2 and points_array.shape[1] >= 2:
+                # If only x,y available, add z=0
+                points_3d = np.column_stack([points_array[:, :2], np.zeros(points_array.shape[0])])
+            else:
+                # Fallback: assume it's already in correct format
+                points_3d = points_array
                 
             self.point_scatter.setData(pos=points_3d)
             
             # Update 2D point cloud (X-Y projection)
-            x_points = points_3d[:, 0]
-            y_points = points_3d[:, 1]
-            self.point_scatter_2d.setData(x_points, y_points)
-            
-            # Update combined view
-            if hasattr(self, 'point_scatter_2d_combined'):
-                self.point_scatter_2d_combined.setData(x_points, y_points)
-            
-            # --- NEW: Dynamic auto-range for 2D plots ---
-            try:
-                if len(x_points) > 0 and len(y_points) > 0:
-                    margin = 2  # meters margin around points
-                    xmin, xmax = np.min(x_points), np.max(x_points)
-                    ymin, ymax = np.min(y_points), np.max(y_points)
-                    self.plot_2d.setXRange(xmin - margin, xmax + margin)
-                    self.plot_2d.setYRange(ymin - margin, ymax + margin)
+            if len(points_3d.shape) >= 2 and points_3d.shape[1] >= 2:
+                x_points = points_3d[:, 0]
+                y_points = points_3d[:, 1]
+                
+                self.point_scatter_2d.setData(x_points, y_points)
+                
+                # Update combined view
+                if hasattr(self, 'point_scatter_2d_combined'):
+                    self.point_scatter_2d_combined.setData(x_points, y_points)
+                
+                # Enable dynamic auto-range for 2D plots for better visualization
+                # try:
+                #     if len(x_points) > 0 and len(y_points) > 0:
+                #         margin = 2  # meters margin around points
+                #         xmin, xmax = np.min(x_points), np.max(x_points)
+                #         ymin, ymax = np.min(y_points), np.max(y_points)
+                        
+                #         # Ensure minimum range for visibility
+                #         if xmax - xmin < 1:
+                #             xmin, xmax = xmin - 1, xmax + 1
+                #         if ymax - ymin < 1:
+                #             ymin, ymax = ymin - 1, ymax + 1
+                            
+                #         self.plot_2d.setXRange(xmin - margin, xmax + margin)
+                #         self.plot_2d.setYRange(max(0.0, float(ymin - margin)), ymax + margin)  # Keep y >= 0
 
-                    # Apply the same ranges to the combined 2D view if it exists
-                    if hasattr(self, 'plot_2d_combined'):
-                        self.plot_2d_combined.setXRange(xmin - margin, xmax + margin)
-                        self.plot_2d_combined.setYRange(ymin - margin, ymax + margin)
-            except Exception:
-                # In case of numerical issues, ignore and keep previous range
-                pass
+                #         # Apply the same ranges to the combined 2D view if it exists
+                #         if hasattr(self, 'plot_2d_combined'):
+                #             self.plot_2d_combined.setXRange(xmin - margin, xmax + margin)
+                #             self.plot_2d_combined.setYRange(max(0.0, float(ymin - margin)), ymax + margin)
+                # except Exception:
+                #     # In case of numerical issues, ignore and keep previous range
+                #     pass
         else:
             # No point cloud data, clear displays
             self.point_scatter.setData(pos=np.array([[0, 0, 0]]))
@@ -955,21 +1039,39 @@ class RadarGUI(QMainWindow):
                 except Exception:
                     pass
             
+            print("DEBUG: ========== STARTING RECORDING ==========")
+            print(f"DEBUG: Recording mode: {self.data_recorder.recording_mode}")
+            print(f"DEBUG: Radar connected: {self.radar_thread.radar is not None}")
+            print(f"DEBUG: Radar thread running: {self.radar_thread.is_running}")
+            
             success, message = self.data_recorder.start_recording(config_commands)
             if success:
                 self.record_btn.setText("⏹️ Stop Recording")
                 self.save_recording_btn.setEnabled(False)
                 self.log_status(message)
+                print("DEBUG: Recording started successfully")
             else:
                 self.log_status(f"Failed to start recording: {message}")
+                print(f"DEBUG: Recording start failed: {message}")
         else:
+            print("DEBUG: ========== STOPPING RECORDING ==========")
+            
+            # Log final stats before stopping
+            stats = self.data_recorder.get_recording_stats()
+            print(f"DEBUG: Final recording stats before stop:")
+            print(f"DEBUG: - Frame count: {stats['frame_count']}")
+            print(f"DEBUG: - Radar frames: {stats['radar_frames']}")
+            print(f"DEBUG: - Duration: {stats.get('duration_seconds', 0):.2f}s")
+            
             success, message = self.data_recorder.stop_recording()
             if success:
                 self.record_btn.setText("🔴 Start Recording")
                 self.save_recording_btn.setEnabled(True)
                 self.log_status(message)
+                print("DEBUG: Recording stopped successfully")
             else:
                 self.log_status(f"Failed to stop recording: {message}")
+                print(f"DEBUG: Recording stop failed: {message}")
     
     def save_recording(self):
         """Save current recording session"""
