@@ -22,7 +22,7 @@ A PyQt-based GUI application for reading and visualizing data from the IWR6843IS
 
 1. Clone this repository:
 ```bash
-git clone <repository-url>
+git clone [<repository-url>](https://github.com/Adibfikal/Traffic-mmWave.git)
 cd <repository-directory>
 ```
 
