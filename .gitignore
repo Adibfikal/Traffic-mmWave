@@ -6,3 +6,6 @@ test_ports.py
 test_with_config.py
 list_ports.py
 replay_example.json
+recordings/session_20250704_013617/camera_video.mp4
+recordings/session_20250704_013617/session_info.json
+__pycache__/data_recorder.cpython-313.pyc

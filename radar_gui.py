@@ -2,7 +2,8 @@ import sys
 import numpy as np
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QLabel, QLineEdit, 
-                             QTextEdit, QGroupBox, QGridLayout, QSplitter, QTabWidget, QComboBox)
+                             QTextEdit, QGroupBox, QGridLayout, QSplitter, QTabWidget, QComboBox,
+                             QFileDialog, QSlider, QSpinBox, QCheckBox, QInputDialog, QDialog, QListWidget)
 from PySide6.QtCore import QTimer, Signal, QThread, Slot, Qt
 from PySide6.QtGui import QImage, QPixmap
 import pyqtgraph as pg
@@ -13,7 +14,7 @@ import cv2
 import os
 
 from radar_interface import RadarInterface
-from tracking import ObjectTracker
+from data_recorder import DataRecorder
 
 class WebcamThread(QThread):
     """Thread for webcam capture without blocking the GUI"""
@@ -154,17 +155,11 @@ class RadarGUI(QMainWindow):
         # Initialize components
         self.radar_thread = RadarDataThread()
         self.webcam_thread = WebcamThread()
-        self.tracker = ObjectTracker()
+        self.data_recorder = DataRecorder()
         
         # Data storage
         self.point_cloud_data = None
-        self.tracked_objects = {}
-        self.object_trails = {}  # Store trails for each tracked object
-        self.max_trail_length = 50
         self.current_frame = None
-        
-        # Display mode state - True for point cloud, False for tracked targets
-        self.show_point_cloud_mode = True
         
         # Setup UI
         self.setup_ui()
@@ -340,6 +335,57 @@ class RadarGUI(QMainWindow):
         webcam_group.setLayout(webcam_layout)
         layout.addWidget(webcam_group)
         
+        # Recording configuration
+        recording_group = QGroupBox("Recording & Playback")
+        recording_layout = QGridLayout()
+        
+        # Recording mode selection
+        recording_layout.addWidget(QLabel("Record Mode:"), 0, 0)
+        self.recording_mode_combo = QComboBox()
+        self.recording_mode_combo.addItems(["Both (Radar + Camera)", "Point Cloud Only", "Camera Only"])
+        self.recording_mode_combo.currentTextChanged.connect(self.on_recording_mode_changed)
+        recording_layout.addWidget(self.recording_mode_combo, 0, 1, 1, 2)
+        
+        # Recording controls
+        self.record_btn = QPushButton("🔴 Start Recording")
+        self.record_btn.clicked.connect(self.toggle_recording)
+        recording_layout.addWidget(self.record_btn, 1, 0, 1, 2)
+        
+        self.save_recording_btn = QPushButton("💾 Save Recording")
+        self.save_recording_btn.clicked.connect(self.save_recording)
+        self.save_recording_btn.setEnabled(False)
+        recording_layout.addWidget(self.save_recording_btn, 1, 2)
+        
+        # Playback controls
+        self.load_recording_btn = QPushButton("📁 Load Recording")
+        self.load_recording_btn.clicked.connect(self.load_recording)
+        recording_layout.addWidget(self.load_recording_btn, 2, 0)
+        
+        self.play_btn = QPushButton("▶️ Play")
+        self.play_btn.clicked.connect(self.toggle_playback)
+        self.play_btn.setEnabled(False)
+        recording_layout.addWidget(self.play_btn, 2, 1)
+        
+        self.stop_playback_btn = QPushButton("⏹️ Stop")
+        self.stop_playback_btn.clicked.connect(self.stop_playback)
+        self.stop_playback_btn.setEnabled(False)
+        recording_layout.addWidget(self.stop_playback_btn, 2, 2)
+        
+        # Playback speed
+        recording_layout.addWidget(QLabel("Speed:"), 3, 0)
+        self.playback_speed_slider = QSlider(Qt.Orientation.Horizontal)
+        self.playback_speed_slider.setMinimum(1)
+        self.playback_speed_slider.setMaximum(50)  # 0.1x to 5.0x speed
+        self.playback_speed_slider.setValue(10)  # 1.0x speed
+        self.playback_speed_slider.valueChanged.connect(self.on_playback_speed_changed)
+        recording_layout.addWidget(self.playback_speed_slider, 3, 1)
+        
+        self.playback_speed_label = QLabel("1.0x")
+        recording_layout.addWidget(self.playback_speed_label, 3, 2)
+        
+        recording_group.setLayout(recording_layout)
+        layout.addWidget(recording_group)
+        
         # Control buttons
         button_layout = QVBoxLayout()
         
@@ -363,12 +409,7 @@ class RadarGUI(QMainWindow):
         self.debug_checkbox.toggled.connect(self.toggle_debug_mode)
         button_layout.addWidget(self.debug_checkbox)
         
-        # Display mode toggle
-        self.display_mode_btn = QPushButton("Mode: Point Cloud")
-        self.display_mode_btn.setCheckable(True)
-        self.display_mode_btn.setChecked(True)  # Start with point cloud mode
-        self.display_mode_btn.toggled.connect(self.toggle_display_mode)
-        button_layout.addWidget(self.display_mode_btn)
+
         
         layout.addLayout(button_layout)
         
@@ -384,14 +425,16 @@ class RadarGUI(QMainWindow):
         stats_layout = QVBoxLayout()
         
         self.points_label = QLabel("Points: 0")
-        self.objects_label = QLabel("Tracked Objects: 0")
         self.fps_label = QLabel("FPS: 0")
         self.webcam_status_label = QLabel("Webcam: Disconnected")
+        self.recording_status_label = QLabel("Recording: Stopped")
+        self.playback_status_label = QLabel("Playback: No file loaded")
         
         stats_layout.addWidget(self.points_label)
-        stats_layout.addWidget(self.objects_label)
         stats_layout.addWidget(self.fps_label)
         stats_layout.addWidget(self.webcam_status_label)
+        stats_layout.addWidget(self.recording_status_label)
+        stats_layout.addWidget(self.playback_status_label)
         
         stats_group.setLayout(stats_layout)
         layout.addWidget(stats_group)
@@ -453,11 +496,7 @@ class RadarGUI(QMainWindow):
         )
         self.plot_widget.addItem(self.point_scatter)
         
-        # Dictionary to store scatter plots for tracked objects
-        self.object_scatters = {}
-        
-        # Dictionary to store line plots for trails
-        self.trail_lines = {}
+
         
         # === 2D Bird's Eye View ===
         self.plot_2d = pg.PlotWidget()
@@ -469,7 +508,7 @@ class RadarGUI(QMainWindow):
         
         # Set range with y starting at 0
         self.plot_2d.setXRange(-10, 10)
-        self.plot_2d.setYRange(0, 20)
+        self.plot_2d.setYRange(0, 50)
         
         # Add origin marker
         origin = pg.ScatterPlotItem([0], [0], pen='w', brush='w', size=10, symbol='o')
@@ -484,9 +523,7 @@ class RadarGUI(QMainWindow):
         )
         self.plot_2d.addItem(self.point_scatter_2d)
         
-        # Dictionaries for 2D tracked objects and trails
-        self.object_scatters_2d = {}
-        self.trail_lines_2d = {}
+
         
         # Add both widgets to splitter
         splitter.addWidget(self.plot_widget)
@@ -529,7 +566,7 @@ class RadarGUI(QMainWindow):
         self.plot_2d_combined.setAspectLocked(True)
         self.plot_2d_combined.showGrid(x=True, y=True)
         self.plot_2d_combined.setXRange(-10, 10)
-        self.plot_2d_combined.setYRange(0, 20)
+        self.plot_2d_combined.setYRange(0, 50)
         
         # Add origin marker for combined view
         origin_combined = pg.ScatterPlotItem([0], [0], pen='w', brush='w', size=10, symbol='o')
@@ -662,16 +699,7 @@ class RadarGUI(QMainWindow):
             self.log_status("Debug mode disabled")
             print("\n=== Point Cloud Debug Mode Disabled ===\n")
     
-    def toggle_display_mode(self, checked):
-        """Toggle between point cloud and tracked targets display"""
-        if checked:
-            self.show_point_cloud_mode = True
-            self.display_mode_btn.setText("Mode: Point Cloud")
-            self.log_status("Display mode: Point Cloud only")
-        else:
-            self.show_point_cloud_mode = False
-            self.display_mode_btn.setText("Mode: Tracked Targets")
-            self.log_status("Display mode: Tracked Targets only")
+
     
     def toggle_webcam(self):
         """Start or stop webcam capture"""
@@ -703,10 +731,45 @@ class RadarGUI(QMainWindow):
         """Update webcam display with new frame"""
         self.current_frame = frame
         
-        # Convert numpy array to QImage
-        height, width, channel = frame.shape
+        # Record camera frame if recording is active
+        if self.data_recorder.is_recording:
+            # The frame from webcam is already in RGB format, but OpenCV expects BGR
+            # So we need to convert RGB to BGR for proper recording
+            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            self.data_recorder.add_camera_frame(frame_bgr)
+        
+        # Only update displays if playback is NOT active to avoid conflicts
+        if not self.data_recorder.is_playing:
+            # Convert numpy array to QImage
+            height, width, channel = frame.shape
+            bytes_per_line = 3 * width
+            q_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+            
+            # Scale image to fit label while maintaining aspect ratio
+            pixmap = QPixmap.fromImage(q_image)
+            scaled_pixmap = pixmap.scaled(
+                self.webcam_label.size(), 
+                Qt.AspectRatioMode.KeepAspectRatio, 
+                Qt.TransformationMode.SmoothTransformation
+            )
+            
+            # Update both webcam displays
+            self.webcam_label.setPixmap(scaled_pixmap)
+            
+            # For combined view, scale to smaller size
+            scaled_pixmap_combined = pixmap.scaled(
+                self.webcam_label_combined.size(), 
+                Qt.AspectRatioMode.KeepAspectRatio, 
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.webcam_label_combined.setPixmap(scaled_pixmap_combined)
+    
+    def _update_webcam_displays_with_frame(self, frame_rgb):
+        """Update webcam displays directly with a frame (used for playback)"""
+        # Convert numpy array to QImage - frame should already be in RGB format
+        height, width, channel = frame_rgb.shape
         bytes_per_line = 3 * width
-        q_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_RGB888)
+        q_image = QImage(frame_rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
         
         # Scale image to fit label while maintaining aspect ratio
         pixmap = QPixmap.fromImage(q_image)
@@ -726,7 +789,7 @@ class RadarGUI(QMainWindow):
             Qt.TransformationMode.SmoothTransformation
         )
         self.webcam_label_combined.setPixmap(scaled_pixmap_combined)
-    
+
     @Slot(str)
     def handle_webcam_error(self, error_msg):
         """Handle webcam errors"""
@@ -736,6 +799,20 @@ class RadarGUI(QMainWindow):
     @Slot(dict)
     def update_data(self, data):
         """Update with new radar data"""
+        # Record radar data if recording is active
+        if self.data_recorder.is_recording:
+            # Format data for recording
+            radar_data = {
+                "error": 0,
+                "frameNum": data.get('header', {}).get('frameNumber', 0),
+                "pointCloud": data.get('pointCloud', []),
+                "numDetectedPoints": len(data.get('pointCloud', [])),
+                "numDetectedTracks": 0,
+                "trackData": [],
+                "trackIndexes": []
+            }
+            self.data_recorder.add_radar_frame(radar_data)
+        
         # Extract point cloud
         if 'pointCloud' in data:
             self.point_cloud_data = data['pointCloud']
@@ -756,55 +833,45 @@ class RadarGUI(QMainWindow):
                 
                 print(f"Total points: {len(self.point_cloud_data)}")
             
-            # Update tracker with new point cloud (need to handle 4D points)
-            if self.point_cloud_data is not None and len(self.point_cloud_data) > 0:
-                # Extract only x,y,z for tracker (it expects 3D points)
-                points_3d = self.point_cloud_data[:, :3] if self.point_cloud_data.shape[1] >= 3 else self.point_cloud_data
-                
-                # Check if we have enough points for clustering (HDBSCAN needs at least 2)
-                if len(points_3d) >= 2:
-                    tracked_objects = self.tracker.update(points_3d)
-                    self.tracked_objects = tracked_objects
-                else:
-                    # For single points, just treat as untracked objects
-                    self.tracked_objects = {}
-            else:
-                tracked_objects = self.tracker.update(None)
-                self.tracked_objects = tracked_objects
-            
-            # Update trails
-            self.update_trails()
-            
             # Update statistics
             num_points = len(self.point_cloud_data) if self.point_cloud_data is not None else 0
-            if self.show_point_cloud_mode:
-                self.points_label.setText(f"Points: {num_points} (displayed)")
-                self.objects_label.setText(f"Tracked Objects: {len(self.tracked_objects)} (hidden)")
-            else:
-                self.points_label.setText(f"Points: {num_points} (hidden)")
-                self.objects_label.setText(f"Tracked Objects: {len(self.tracked_objects)} (displayed)")
+            self.points_label.setText(f"Points: {num_points}")
             
-    def update_trails(self):
-        """Update trail history for tracked objects"""
-        current_ids = set(self.tracked_objects.keys())
-        
-        # Remove trails for objects that no longer exist
-        for obj_id in list(self.object_trails.keys()):
-            if obj_id not in current_ids:
-                del self.object_trails[obj_id]
-                
-        # Update trails for existing objects
-        for obj_id, obj_data in self.tracked_objects.items():
-            if obj_id not in self.object_trails:
-                self.object_trails[obj_id] = deque(maxlen=self.max_trail_length)
-                
-            position = obj_data['position']
-            self.object_trails[obj_id].append(position.copy())
+
             
     def update_visualization(self):
         """Update both 3D and 2D visualizations"""
-        # Update 3D point cloud - only show if in point cloud mode
-        if self.show_point_cloud_mode and self.point_cloud_data is not None and len(self.point_cloud_data) > 0:
+        # Handle playback if active
+        if self.data_recorder.is_playing:
+            playback_frame = self.data_recorder.get_next_playback_frame()
+            if playback_frame:
+                # Handle radar data from playback
+                if "frameData" in playback_frame:
+                    frame_data = playback_frame["frameData"]
+                    if frame_data.get("pointCloud"):
+                        self.point_cloud_data = np.array(frame_data["pointCloud"])
+                    
+                # Handle camera data from playback - UPDATE DISPLAYS DIRECTLY
+                if "cameraFrame" in playback_frame and "decoded_image" in playback_frame["cameraFrame"]:
+                    camera_frame = playback_frame["cameraFrame"]["decoded_image"]
+                    if camera_frame is not None:
+                        # Update webcam displays directly to avoid conflict with live webcam
+                        self._update_webcam_displays_with_frame(camera_frame)
+                
+                self.update_playback_status()
+        
+        # Update recording statistics
+        if self.data_recorder.is_recording:
+            stats = self.data_recorder.get_recording_stats()
+            status = f"Recording: {stats['recording_mode']} mode - {stats['frame_count']} frames"
+            if stats.get('duration_seconds'):
+                status += f" ({stats['duration_seconds']:.1f}s)"
+            self.recording_status_label.setText(status)
+        else:
+            self.recording_status_label.setText("Recording: Stopped")
+            
+        # Update 3D and 2D point cloud visualization
+        if self.point_cloud_data is not None and len(self.point_cloud_data) > 0:
             # Extract only x,y,z for 3D visualization
             if self.point_cloud_data.shape[1] >= 3:
                 points_3d = self.point_cloud_data[:, :3]
@@ -821,137 +888,33 @@ class RadarGUI(QMainWindow):
             # Update combined view
             if hasattr(self, 'point_scatter_2d_combined'):
                 self.point_scatter_2d_combined.setData(x_points, y_points)
-        elif not self.show_point_cloud_mode:
-            # Hide point cloud data when in tracked targets mode
+            
+            # --- NEW: Dynamic auto-range for 2D plots ---
+            try:
+                if len(x_points) > 0 and len(y_points) > 0:
+                    margin = 2  # meters margin around points
+                    xmin, xmax = np.min(x_points), np.max(x_points)
+                    ymin, ymax = np.min(y_points), np.max(y_points)
+                    self.plot_2d.setXRange(xmin - margin, xmax + margin)
+                    self.plot_2d.setYRange(ymin - margin, ymax + margin)
+
+                    # Apply the same ranges to the combined 2D view if it exists
+                    if hasattr(self, 'plot_2d_combined'):
+                        self.plot_2d_combined.setXRange(xmin - margin, xmax + margin)
+                        self.plot_2d_combined.setYRange(ymin - margin, ymax + margin)
+            except Exception:
+                # In case of numerical issues, ignore and keep previous range
+                pass
+        else:
+            # No point cloud data, clear displays
             self.point_scatter.setData(pos=np.array([[0, 0, 0]]))
             self.point_scatter_2d.setData([], [])
             
-            # Also hide in combined view
+            # Also clear combined view
             if hasattr(self, 'point_scatter_2d_combined'):
                 self.point_scatter_2d_combined.setData([], [])
-        
-        # Update tracked objects and trails - only show if in tracked targets mode
-        if not self.show_point_cloud_mode:
-            current_ids = set(self.tracked_objects.keys())
-            existing_ids = set(self.object_scatters.keys())
-            
-            # Remove visualizations for objects that no longer exist
-            for obj_id in existing_ids - current_ids:
-                # Remove from 3D view
-                if obj_id in self.object_scatters:
-                    self.plot_widget.removeItem(self.object_scatters[obj_id])
-                    del self.object_scatters[obj_id]
                     
-                if obj_id in self.trail_lines:
-                    self.plot_widget.removeItem(self.trail_lines[obj_id])
-                    del self.trail_lines[obj_id]
-                    
-                # Remove from 2D view
-                if obj_id in self.object_scatters_2d:
-                    self.plot_2d.removeItem(self.object_scatters_2d[obj_id])
-                    del self.object_scatters_2d[obj_id]
-                    
-                if obj_id in self.trail_lines_2d:
-                    self.plot_2d.removeItem(self.trail_lines_2d[obj_id])
-                    del self.trail_lines_2d[obj_id]
-            
-            # Update or create visualizations for current objects
-            for obj_id, obj_data in self.tracked_objects.items():
-                color = self.get_object_color(obj_id)
-                color_rgb = [int(c * 255) for c in color]
-                
-                # === Update 3D visualization ===
-                if obj_id not in self.object_scatters:
-                    scatter = gl.GLScatterPlotItem(
-                        pos=np.array([obj_data['position']]),
-                        color=color + (1,),
-                        size=0.5
-                    )
-                    self.plot_widget.addItem(scatter)
-                    self.object_scatters[obj_id] = scatter
-                else:
-                    self.object_scatters[obj_id].setData(
-                        pos=np.array([obj_data['position']])
-                    )
-                
-                # Update 3D trail
-                if obj_id in self.object_trails and len(self.object_trails[obj_id]) > 1:
-                    trail_points = np.array(list(self.object_trails[obj_id]))
-                    
-                    if obj_id not in self.trail_lines:
-                        line = gl.GLLinePlotItem(
-                            pos=trail_points,
-                            color=color + (0.5,),
-                            width=2,
-                            antialias=True
-                        )
-                        self.plot_widget.addItem(line)
-                        self.trail_lines[obj_id] = line
-                    else:
-                        self.trail_lines[obj_id].setData(pos=trail_points)
-                        
-                # === Update 2D visualization ===
-                obj_x = obj_data['position'][0]
-                obj_y = obj_data['position'][1]
-                
-                # Update 2D object position
-                if obj_id not in self.object_scatters_2d:
-                    scatter_2d = pg.ScatterPlotItem(
-                        [obj_x], [obj_y],
-                        pen=pg.mkPen(color=color_rgb, width=2),
-                        brush=pg.mkBrush(color_rgb + [255]),
-                        size=10,
-                        symbol='o'
-                    )
-                    self.plot_2d.addItem(scatter_2d)
-                    self.object_scatters_2d[obj_id] = scatter_2d
-                else:
-                    self.object_scatters_2d[obj_id].setData([obj_x], [obj_y])
-                
-                # Update 2D trail
-                if obj_id in self.object_trails and len(self.object_trails[obj_id]) > 1:
-                    trail_points = np.array(list(self.object_trails[obj_id]))
-                    trail_x = trail_points[:, 0]
-                    trail_y = trail_points[:, 1]
-                    
-                    if obj_id not in self.trail_lines_2d:
-                        line_2d = self.plot_2d.plot(
-                            trail_x, trail_y,
-                            pen=pg.mkPen(color=color_rgb + [128], width=2)
-                        )
-                        self.trail_lines_2d[obj_id] = line_2d
-                    else:
-                        self.trail_lines_2d[obj_id].setData(trail_x, trail_y)
-        else:
-            # Hide tracked objects when in point cloud mode
-            current_ids = set(self.tracked_objects.keys())
-            existing_ids = set(self.object_scatters.keys())
-            
-            # Hide all tracked object visualizations
-            for obj_id in existing_ids:
-                # Hide from 3D view
-                if obj_id in self.object_scatters:
-                    self.plot_widget.removeItem(self.object_scatters[obj_id])
-                    del self.object_scatters[obj_id]
-                    
-                if obj_id in self.trail_lines:
-                    self.plot_widget.removeItem(self.trail_lines[obj_id])
-                    del self.trail_lines[obj_id]
-                    
-                # Hide from 2D view
-                if obj_id in self.object_scatters_2d:
-                    self.plot_2d.removeItem(self.object_scatters_2d[obj_id])
-                    del self.object_scatters_2d[obj_id]
-                    
-                if obj_id in self.trail_lines_2d:
-                    self.plot_2d.removeItem(self.trail_lines_2d[obj_id])
-                    del self.trail_lines_2d[obj_id]
-                    
-    def get_object_color(self, obj_id):
-        """Get a consistent color for an object based on its ID"""
-        # Generate a color based on object ID
-        np.random.seed(obj_id)
-        return tuple(np.random.rand(3))
+
         
     def handle_error(self, error_msg):
         """Handle error messages from the radar thread"""
@@ -961,6 +924,210 @@ class RadarGUI(QMainWindow):
         """Log a status message"""
         timestamp = time.strftime("%H:%M:%S")
         self.status_text.append(f"[{timestamp}] {message}")
+    
+    # Recording and Playback Methods
+    def on_recording_mode_changed(self, mode_text):
+        """Handle recording mode change"""
+        mode_map = {
+            "Both (Radar + Camera)": "both",
+            "Point Cloud Only": "pointcloud", 
+            "Camera Only": "camera"
+        }
+        mode = mode_map.get(mode_text, "both")
+        self.data_recorder.set_recording_mode(mode)
+        self.log_status(f"Recording mode set to: {mode}")
+    
+    def toggle_recording(self):
+        """Start or stop recording"""
+        if not self.data_recorder.is_recording:
+            # Get config commands if radar is connected
+            config_commands = []
+            if self.radar_thread.radar:
+                try:
+                    # Try to get config from file
+                    config_file = 'xwr68xx_config.cfg'
+                    if os.path.exists(config_file):
+                        with open(config_file, 'r') as f:
+                            for line in f:
+                                line = line.strip()
+                                if line and not line.startswith('%'):
+                                    config_commands.append(line)
+                except Exception:
+                    pass
+            
+            success, message = self.data_recorder.start_recording(config_commands)
+            if success:
+                self.record_btn.setText("⏹️ Stop Recording")
+                self.save_recording_btn.setEnabled(False)
+                self.log_status(message)
+            else:
+                self.log_status(f"Failed to start recording: {message}")
+        else:
+            success, message = self.data_recorder.stop_recording()
+            if success:
+                self.record_btn.setText("🔴 Start Recording")
+                self.save_recording_btn.setEnabled(True)
+                self.log_status(message)
+            else:
+                self.log_status(f"Failed to stop recording: {message}")
+    
+    def save_recording(self):
+        """Save current recording session"""
+        if not self.data_recorder.session_folder:
+            self.log_status("No recording session to save")
+            return
+        
+        # Get custom name from user
+        from PySide6.QtWidgets import QInputDialog
+        custom_name, ok = QInputDialog.getText(
+            self, 
+            "Save Recording",
+            "Enter a name for this recording:",
+            text=f"recording_{time.strftime('%Y%m%d_%H%M%S')}"
+        )
+        
+        if ok and custom_name.strip():
+            success, message = self.data_recorder.save_recording(custom_name.strip())
+            self.log_status(message)
+            if success:
+                self.save_recording_btn.setEnabled(False)
+        elif ok:
+            # User clicked OK but didn't enter a name, use automatic name
+            success, message = self.data_recorder.save_recording()
+            self.log_status(message)
+            if success:
+                self.save_recording_btn.setEnabled(False)
+    
+    def load_recording(self):
+        """Load recording session for playback"""
+        # First try to use folder dialog
+        recordings_dir = "recordings"
+        if not os.path.exists(recordings_dir):
+            # If no recordings folder, create it and inform user
+            os.makedirs(recordings_dir, exist_ok=True)
+            self.log_status("No recordings found. The 'recordings' folder has been created.")
+            return
+        
+        # Get list of available recordings
+        recordings = self.data_recorder.list_recordings()
+        
+        if not recordings:
+            self.log_status("No recordings found in the recordings folder.")
+            return
+        
+        # Show recordings in a selection dialog
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QListWidget, QLabel, QPushButton, QHBoxLayout
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Select Recording")
+        dialog.setMinimumSize(500, 400)
+        
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel("Available Recordings:"))
+        
+        # Create list widget
+        list_widget = QListWidget()
+        for recording in recordings:
+            info = recording["info"]
+            name = recording["name"]
+            mode = info.get("recording_mode", "unknown")
+            duration = info.get("duration_seconds", 0)
+            size_mb = recording["size_mb"]
+            
+            # Format display text
+            display_text = f"{name} ({mode}) - {duration:.1f}s, {size_mb:.1f}MB"
+            list_widget.addItem(display_text)
+            list_widget.item(list_widget.count() - 1).setData(256, recording["path"])  # Store path as user data
+        
+        layout.addWidget(list_widget)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        load_button = QPushButton("Load")
+        cancel_button = QPushButton("Cancel")
+        button_layout.addWidget(load_button)
+        button_layout.addWidget(cancel_button)
+        layout.addLayout(button_layout)
+        
+        dialog.setLayout(layout)
+        
+        # Connect signals
+        def load_selected():
+            current_item = list_widget.currentItem()
+            if current_item:
+                session_path = current_item.data(256)
+                success, message = self.data_recorder.load_recording(session_path)
+                self.log_status(message)
+                if success:
+                    self.play_btn.setEnabled(True)
+                    self.update_playback_status()
+                dialog.accept()
+        
+        def on_double_click():
+            load_selected()
+        
+        load_button.clicked.connect(load_selected)
+        cancel_button.clicked.connect(dialog.reject)
+        list_widget.itemDoubleClicked.connect(on_double_click)
+        
+        dialog.exec()
+    
+    def toggle_playback(self):
+        """Start or stop playback"""
+        if not self.data_recorder.is_playing:
+            speed = self.playback_speed_slider.value() / 10.0
+            success, message = self.data_recorder.start_playback(speed)
+            if success:
+                self.play_btn.setText("⏸️ Pause")
+                self.stop_playback_btn.setEnabled(True)
+                self.log_status(message)
+                if self.webcam_thread.is_running:
+                    self.log_status("Note: Webcam display will show playback video during playback")
+            else:
+                self.log_status(f"Failed to start playback: {message}")
+        else:
+            success, message = self.data_recorder.stop_playback()
+            if success:
+                self.play_btn.setText("▶️ Play")
+                self.stop_playback_btn.setEnabled(False)
+                self.log_status(message)
+    
+    def stop_playback(self):
+        """Stop playback"""
+        success, message = self.data_recorder.stop_playback()
+        if success:
+            self.play_btn.setText("▶️ Play")
+            self.stop_playback_btn.setEnabled(False)
+            self.log_status(message)
+            
+            # Clear playback displays and restore to live webcam if running
+            if self.webcam_thread.is_running:
+                # Webcam will resume updating displays automatically since playback is stopped
+                self.log_status("Switched back to live webcam feed")
+            else:
+                # No webcam running, clear displays
+                self.webcam_label.setText("Webcam feed will appear here")
+                self.webcam_label_combined.setText("Webcam feed will appear here")
+    
+    def on_playback_speed_changed(self, value):
+        """Handle playback speed change"""
+        speed = value / 10.0
+        self.playback_speed_label.setText(f"{speed:.1f}x")
+        if self.data_recorder.is_playing:
+            self.data_recorder.playback_speed = speed
+    
+    def update_playback_status(self):
+        """Update playback status in statistics"""
+        info = self.data_recorder.get_playback_info()
+        if info["loaded"]:
+            session_info = info.get("session_info", {})
+            mode = session_info.get("recording_mode", "unknown")
+            status = f"Loaded: {info['total_frames']} frames ({mode})"
+            if info["is_playing"]:
+                status += f" (Playing {info['progress']:.1f}%)"
+            self.playback_status_label.setText(f"Playback: {status}")
+        else:
+            self.playback_status_label.setText("Playback: No recording loaded")
         
     def closeEvent(self, event):
         """Clean up when closing the application"""
