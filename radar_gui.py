@@ -161,6 +161,18 @@ class RadarGUI(QMainWindow):
         self.point_cloud_data = None
         self.current_frame = None
         
+        # Performance optimization variables
+        self.last_visualization_update = 0
+        self.visualization_update_interval = 50  # Start with 50ms (20 FPS)
+        self.last_point_count = 0
+        self.skip_range_enforcement = False
+        
+        # FPS tracking
+        self.frame_times = deque(maxlen=20)  # Track last 20 frame times
+        self.last_fps_update = 0
+        self.radar_fps = 0  # Track actual radar data reception rate
+        self.viz_fps = 0    # Track visualization update rate
+        
         # Setup UI
         self.setup_ui()
         
@@ -170,10 +182,22 @@ class RadarGUI(QMainWindow):
         self.webcam_thread.frame_ready.connect(self.update_webcam_frame)
         self.webcam_thread.error_occurred.connect(self.handle_webcam_error)
         
-        # Setup update timer for visualization
+        # Setup adaptive update timer for visualization
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.update_visualization)
-        self.update_timer.start(50)  # 20 FPS update rate
+        self.update_timer.start(self.visualization_update_interval)
+        
+        # IMPORTANT: Two separate systems:
+        # 1. RadarDataThread receives data at full 20Hz (independent)
+        # 2. This timer only affects GUI visualization refresh rate (adaptive)
+        
+        # Reduce range enforcement frequency for better performance
+        self.range_timer = QTimer()
+        self.range_timer.timeout.connect(self.enforce_2d_ranges)
+        self.range_timer.start(500)  # Reduced from 100ms to 500ms
+        
+        # Ensure origin markers are positioned correctly after UI setup
+        QTimer.singleShot(100, self.refresh_origin_markers)  # Call after 100ms delay
         
     def scan_available_cameras(self):
         """Scan for available cameras and return a list of camera indices and names"""
@@ -429,12 +453,14 @@ class RadarGUI(QMainWindow):
         self.webcam_status_label = QLabel("Webcam: Disconnected")
         self.recording_status_label = QLabel("Recording: Stopped")
         self.playback_status_label = QLabel("Playback: No file loaded")
+        self.performance_status_label = QLabel("Performance: Normal")
         
         stats_layout.addWidget(self.points_label)
         stats_layout.addWidget(self.fps_label)
         stats_layout.addWidget(self.webcam_status_label)
         stats_layout.addWidget(self.recording_status_label)
         stats_layout.addWidget(self.playback_status_label)
+        stats_layout.addWidget(self.performance_status_label)
         
         stats_group.setLayout(stats_layout)
         layout.addWidget(stats_group)
@@ -444,38 +470,31 @@ class RadarGUI(QMainWindow):
         return panel
         
     def create_visualization_panel(self):
-        """Create the visualization panel with tabs for radar and webcam"""
+        """Create the visualization panel with tabs for radar and combined view"""
         panel = QGroupBox("Visualization")
         layout = QVBoxLayout()
         
         # Create tab widget
         self.tab_widget = QTabWidget()
         
-        # Radar tab
+        # Radar tab (3D only)
         radar_tab = self.create_radar_tab()
-        self.tab_widget.addTab(radar_tab, "Radar Data")
+        self.tab_widget.addTab(radar_tab, "Radar Data (3D)")
         
-        # Webcam tab
-        webcam_tab = self.create_webcam_tab()
-        self.tab_widget.addTab(webcam_tab, "Webcam Feed")
-        
-        # Combined view tab
+        # Combined view tab (2D + Webcam)
         combined_tab = self.create_combined_tab()
-        self.tab_widget.addTab(combined_tab, "Combined View")
+        self.tab_widget.addTab(combined_tab, "Combined View (2D + Camera)")
         
         layout.addWidget(self.tab_widget)
         panel.setLayout(layout)
         return panel
     
     def create_radar_tab(self):
-        """Create the radar visualization tab"""
+        """Create the radar visualization tab with 3D view only"""
         radar_widget = QWidget()
         layout = QVBoxLayout()
         
-        # Create a splitter to hold both views
-        splitter = QSplitter(Qt.Orientation.Vertical)
-        
-        # === 3D View ===
+        # === 3D View Only ===
         self.plot_widget = gl.GLViewWidget()
         self.plot_widget.setCameraPosition(distance=50)
         
@@ -496,143 +515,140 @@ class RadarGUI(QMainWindow):
         )
         self.plot_widget.addItem(self.point_scatter)
         
-
-        
-        # === 2D Bird's Eye View ===
-        self.plot_2d = pg.PlotWidget()
-        self.plot_2d.setLabel('left', 'Y Distance (Forward)', units='m')
-        self.plot_2d.setLabel('bottom', 'X Distance (Left/Right)', units='m')
-        self.plot_2d.setTitle("Bird's Eye View (2D)")
-        self.plot_2d.setAspectLocked(True)
-        self.plot_2d.showGrid(x=True, y=True)
-        
-        # Disable auto-range to maintain our coordinate system
-        self.plot_2d.enableAutoRange(False)
-        self.plot_2d.setMouseEnabled(x=True, y=True)  # Allow manual zoom/pan
-        
-        # Set range with origin centered at bottom
-        self.plot_2d.setXRange(-15, 15)
-        self.plot_2d.setYRange(-2, 50)
-        
-        # Add origin marker with better visibility
-        self.origin_marker = pg.ScatterPlotItem(
-            [0], [0], 
-            pen=pg.mkPen('red', width=3), 
-            brush=pg.mkBrush('red'), 
-            size=20, 
-            symbol='+'
-        )
-        self.plot_2d.addItem(self.origin_marker)
-        
-        # Add crosshairs at origin for better reference
-        # Vertical line at x=0
-        self.v_line = pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen('red', width=2, style=pg.QtCore.Qt.PenStyle.DashLine))
-        self.plot_2d.addItem(self.v_line)
-        
-        # Horizontal line at y=0
-        self.h_line = pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen('red', width=2, style=pg.QtCore.Qt.PenStyle.DashLine))
-        self.plot_2d.addItem(self.h_line)
-        
-        # Create scatter plot for 2D point cloud
-        self.point_scatter_2d = pg.ScatterPlotItem(
-            [], [], 
-            pen=None, 
-            brush=(255, 255, 255, 150),  # Slightly more opaque
-            size=8  # Larger points for better visibility
-        )
-        self.plot_2d.addItem(self.point_scatter_2d)
-        
-        # Add both widgets to splitter
-        splitter.addWidget(self.plot_widget)
-        splitter.addWidget(self.plot_2d)
-        splitter.setSizes([400, 400])  # Equal sizes
-        
-        layout.addWidget(splitter)
+        # Add 3D view directly to layout (no splitter)
+        layout.addWidget(self.plot_widget)
         radar_widget.setLayout(layout)
         return radar_widget
     
-    def create_webcam_tab(self):
-        """Create the webcam feed tab"""
-        webcam_widget = QWidget()
-        layout = QVBoxLayout()
-        
-        # Webcam display label
-        self.webcam_label = QLabel("Webcam feed will appear here")
-        self.webcam_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.webcam_label.setMinimumSize(640, 480)
-        self.webcam_label.setStyleSheet("border: 1px solid gray; background-color: black; color: white;")
-        
-        layout.addWidget(self.webcam_label)
-        webcam_widget.setLayout(layout)
-        return webcam_widget
+
     
     def create_combined_tab(self):
-        """Create the combined view tab showing both radar and webcam"""
+        """Create the combined view tab with 2D radar visualization and webcam feed"""
         combined_widget = QWidget()
         layout = QHBoxLayout()
         
-        # Left side - Radar (2D view)
+        # Left side - 2D Radar Visualization with origin at 0,0
         radar_side = QWidget()
         radar_layout = QVBoxLayout()
-        radar_layout.addWidget(QLabel("Radar Bird's Eye View"))
+        radar_layout.addWidget(QLabel("2D Radar View (Bird's Eye)"))
         
-        # Create a smaller 2D plot for combined view
+        # Create 2D plot for combined view with origin at 0,0
         self.plot_2d_combined = pg.PlotWidget()
         self.plot_2d_combined.setLabel('left', 'Y Distance (Forward)', units='m')
         self.plot_2d_combined.setLabel('bottom', 'X Distance (Left/Right)', units='m')
+        self.plot_2d_combined.setTitle("Bird's Eye View - Origin at Radar")
         self.plot_2d_combined.setAspectLocked(True)
         self.plot_2d_combined.showGrid(x=True, y=True)
-        self.plot_2d_combined.setXRange(-15, 15)
-        self.plot_2d_combined.setYRange(-2, 50)  # Allow small negative Y to see origin clearly
         
-        # Add origin marker for combined view with better visibility
-        self.origin_marker_combined = pg.ScatterPlotItem(
-            [0], [0], 
-            pen=pg.mkPen('red', width=2), 
-            brush=pg.mkBrush('red'), 
-            size=12, 
-            symbol='+'
-        )
-        self.plot_2d_combined.addItem(self.origin_marker_combined)
+        # Set coordinate system with origin at center (0,0)
+        self.plot_2d_combined.enableAutoRange(False)
+        self.plot_2d_combined.setMouseEnabled(x=True, y=True)  # Allow manual zoom/pan
         
-        # Add crosshairs at origin for combined view
-        self.v_line_combined = pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen('red', width=1, style=pg.QtCore.Qt.PenStyle.DashLine))
+        # Set range with origin properly positioned
+        self.plot_2d_combined.setXRange(-20, 20)
+        self.plot_2d_combined.setYRange(-5, 35)
+        
+        # Ensure the plot view is properly established before adding items
+        plot_item = self.plot_2d_combined.getPlotItem()
+        if plot_item is not None:
+            view_box = plot_item.getViewBox()
+            if view_box is not None:
+                view_box.setLimits(xMin=-25, xMax=25, yMin=-10, yMax=40)
+        
+        # Add crosshairs at graph coordinates (0,0) - these should appear at the center
+        self.v_line_combined = pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen('red', width=3, style=pg.QtCore.Qt.PenStyle.DashLine))
+        self.h_line_combined = pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen('red', width=3, style=pg.QtCore.Qt.PenStyle.DashLine))
+        
+        # Add the crosshairs to the plot
         self.plot_2d_combined.addItem(self.v_line_combined)
-        
-        self.h_line_combined = pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen('red', width=1, style=pg.QtCore.Qt.PenStyle.DashLine))
         self.plot_2d_combined.addItem(self.h_line_combined)
         
-        # Create scatter plot for combined 2D view
+        # Add origin marker at graph coordinates (0,0) with high visibility
+        self.origin_marker_combined = self.plot_2d_combined.plot(
+            x=[0], y=[0],
+            pen=None,  # No line connecting points
+            symbol='+',
+            symbolPen=pg.mkPen('red', width=4),
+            symbolBrush=pg.mkBrush('red'),
+            symbolSize=30
+        )
+        
+        # Add a backup origin marker using a circle for better visibility
+        self.origin_circle_combined = self.plot_2d_combined.plot(
+            x=[0], y=[0],
+            pen=None,
+            symbol='o',
+            symbolPen=pg.mkPen('red', width=3),
+            symbolBrush=pg.mkBrush(color=(255, 0, 0, 100)),  # Semi-transparent red
+            symbolSize=20
+        )
+        
+        # Add text label for origin
+        self.origin_text = pg.TextItem(text="RADAR", color=(255, 0, 0), anchor=(0.5, 0.5))
+        self.origin_text.setPos(0, -2)  # Position text slightly below origin
+        self.plot_2d_combined.addItem(self.origin_text)
+        
+        # Create scatter plot for 2D point cloud
         self.point_scatter_2d_combined = pg.ScatterPlotItem(
             [], [], 
             pen=None, 
-            brush=(255, 255, 255, 150),  # Slightly more opaque
-            size=6  # Slightly smaller for combined view
+            brush=(0, 255, 255, 200),  # Cyan color for better visibility
+            size=10  # Larger points for better visibility
         )
         self.plot_2d_combined.addItem(self.point_scatter_2d_combined)
         
         radar_layout.addWidget(self.plot_2d_combined)
         radar_side.setLayout(radar_layout)
         
-        # Right side - Webcam
+        # Right side - Webcam Feed
         webcam_side = QWidget()
         webcam_layout = QVBoxLayout()
-        webcam_layout.addWidget(QLabel("Webcam Feed"))
+        webcam_layout.addWidget(QLabel("Camera Feed"))
         
         self.webcam_label_combined = QLabel("Webcam feed will appear here")
         self.webcam_label_combined.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.webcam_label_combined.setMinimumSize(320, 240)
-        self.webcam_label_combined.setStyleSheet("border: 1px solid gray; background-color: black; color: white;")
+        self.webcam_label_combined.setMinimumSize(480, 360)
+        self.webcam_label_combined.setStyleSheet("border: 2px solid gray; background-color: black; color: white; font-size: 14px;")
         
         webcam_layout.addWidget(self.webcam_label_combined)
         webcam_side.setLayout(webcam_layout)
         
-        # Add both sides to main layout
-        layout.addWidget(radar_side, 2)  # Radar takes 2/3 of space
-        layout.addWidget(webcam_side, 1)  # Webcam takes 1/3 of space
+        # Add both sides to main layout (60% radar, 40% webcam)
+        layout.addWidget(radar_side, 3)  # Radar takes 3/5 of space
+        layout.addWidget(webcam_side, 2)  # Webcam takes 2/5 of space
         
         combined_widget.setLayout(layout)
         return combined_widget
+        
+    def refresh_origin_markers(self):
+        """Ensure origin markers are properly positioned at graph coordinates (0,0)"""
+        if hasattr(self, 'plot_2d_combined'):
+            # Force the plot to update its coordinate system
+            self.plot_2d_combined.setXRange(-20, 20)
+            self.plot_2d_combined.setYRange(-5, 35)
+            
+            # Update crosshair positions to ensure they're at (0,0) in graph coordinates
+            if hasattr(self, 'v_line_combined'):
+                self.v_line_combined.setPos(0)
+            if hasattr(self, 'h_line_combined'):
+                self.h_line_combined.setPos(0)
+                
+            # Update origin marker position with enhanced visibility
+            if hasattr(self, 'origin_marker_combined'):
+                # Update the plot data for the origin marker
+                self.origin_marker_combined.setData(x=[0], y=[0])
+                
+            # Update backup circle marker
+            if hasattr(self, 'origin_circle_combined'):
+                self.origin_circle_combined.setData(x=[0], y=[0])
+                
+            # Update text label position
+            if hasattr(self, 'origin_text'):
+                self.origin_text.setPos(0, -2)
+                
+                # Log for debugging
+                print(f"DEBUG: Origin marker positioned at graph coordinates (0, 0)")
+                print(f"DEBUG: Current plot range - X: {self.plot_2d_combined.viewRange()[0]}, Y: {self.plot_2d_combined.viewRange()[1]}")
         
     def toggle_connection(self):
         """Connect or disconnect from the radar"""
@@ -752,7 +768,6 @@ class RadarGUI(QMainWindow):
             self.webcam_thread.stop()
             self.webcam_btn.setText("Start Webcam")
             self.webcam_status_label.setText("Webcam: Disconnected")
-            self.webcam_label.setText("Webcam feed will appear here")
             self.webcam_label_combined.setText("Webcam feed will appear here")
             self.log_status("Webcam stopped")
     
@@ -777,16 +792,8 @@ class RadarGUI(QMainWindow):
             
             # Scale image to fit label while maintaining aspect ratio
             pixmap = QPixmap.fromImage(q_image)
-            scaled_pixmap = pixmap.scaled(
-                self.webcam_label.size(), 
-                Qt.AspectRatioMode.KeepAspectRatio, 
-                Qt.TransformationMode.SmoothTransformation
-            )
             
-            # Update both webcam displays
-            self.webcam_label.setPixmap(scaled_pixmap)
-            
-            # For combined view, scale to smaller size
+            # Update the combined view webcam display
             scaled_pixmap_combined = pixmap.scaled(
                 self.webcam_label_combined.size(), 
                 Qt.AspectRatioMode.KeepAspectRatio, 
@@ -803,16 +810,8 @@ class RadarGUI(QMainWindow):
         
         # Scale image to fit label while maintaining aspect ratio
         pixmap = QPixmap.fromImage(q_image)
-        scaled_pixmap = pixmap.scaled(
-            self.webcam_label.size(), 
-            Qt.AspectRatioMode.KeepAspectRatio, 
-            Qt.TransformationMode.SmoothTransformation
-        )
         
-        # Update both webcam displays
-        self.webcam_label.setPixmap(scaled_pixmap)
-        
-        # For combined view, scale to smaller size
+        # Update the combined view webcam display
         scaled_pixmap_combined = pixmap.scaled(
             self.webcam_label_combined.size(), 
             Qt.AspectRatioMode.KeepAspectRatio, 
@@ -829,6 +828,10 @@ class RadarGUI(QMainWindow):
     @Slot(dict)
     def update_data(self, data):
         """Update with new radar data"""
+        
+        # FPS tracking for performance monitoring
+        current_time = time.time()
+        self.frame_times.append(current_time)
         
         # DEBUG: Log all received data to understand what's happening
         frame_num = data.get('header', {}).get('frameNumber', 'Unknown')
@@ -885,10 +888,19 @@ class RadarGUI(QMainWindow):
             # Debug mode: print point cloud data to terminal
             if self.debug_checkbox.isChecked() and self.point_cloud_data is not None and len(self.point_cloud_data) > 0:
                 frame_num = data.get('header', {}).get('frameNumber', 'N/A')
-                print(f"\nFrame {frame_num}:")
-                print("-" * 60)
+                point_count = len(self.point_cloud_data)
                 
-                for i, point in enumerate(self.point_cloud_data):
+                # Limit debug output for large point clouds to prevent performance issues
+                if point_count > 50:
+                    print(f"\nFrame {frame_num}: {point_count} points (showing first 10 for performance)")
+                    print("-" * 60)
+                    display_points = self.point_cloud_data[:10]  # Only show first 10 points
+                else:
+                    print(f"\nFrame {frame_num}: {point_count} points")
+                    print("-" * 60)
+                    display_points = self.point_cloud_data
+                
+                for i, point in enumerate(display_points):
                     if len(point) >= 4:
                         # Include doppler if available
                         print(f"Point {i:3d}: X={point[0]:7.3f}m  Y={point[1]:7.3f}m  Z={point[2]:7.3f}m  Doppler={point[3]:6.3f}m/s")
@@ -896,16 +908,78 @@ class RadarGUI(QMainWindow):
                         # Fallback for old format without doppler
                         print(f"Point {i:3d}: X={point[0]:7.3f}m  Y={point[1]:7.3f}m  Z={point[2]:7.3f}m")
                 
-                print(f"Total points: {len(self.point_cloud_data)}")
+                if point_count > 50:
+                    print(f"... and {point_count - 10} more points")
+                print(f"Total points: {point_count}")
             
-            # Update statistics
+            # Update statistics (including FPS)
             num_points = len(self.point_cloud_data) if self.point_cloud_data is not None else 0
             self.points_label.setText(f"Points: {num_points}")
             
+            # Calculate and update FPS (less frequently for performance)
+            if current_time - self.last_fps_update > 1.0:  # Update FPS every second
+                if len(self.frame_times) > 1:
+                    time_span = self.frame_times[-1] - self.frame_times[0]
+                    if time_span > 0:
+                        # This tracks RADAR DATA RECEPTION rate (should be ~20 Hz)
+                        self.radar_fps = (len(self.frame_times) - 1) / time_span
+                        # Visualization rate is separate and adaptive
+                        self.viz_fps = 1000 / self.visualization_update_interval
+                        
+                        self.fps_label.setText(f"Radar: {self.radar_fps:.1f} FPS | Viz: {self.viz_fps:.1f} FPS")
+                    else:
+                        self.fps_label.setText("FPS: Calculating...")
+                else:
+                    self.fps_label.setText("Radar: 0 FPS | Viz: 0 FPS")
+                self.last_fps_update = current_time
 
+    def adjust_update_rate_for_performance(self, point_count):
+        """
+        Dynamically adjust VISUALIZATION update rate based on point cloud size for better performance.
+        
+        IMPORTANT: This ONLY affects how often the GUI plots are refreshed, NOT radar data reception.
+        Radar data continues to be received at the full 20Hz rate in the background thread.
+        The data is stored immediately and the latest data is used for visualization.
+        """
+        if point_count <= 50:
+            # Small point clouds: 20 FPS (50ms)
+            new_interval = 50
+            performance_status = "Performance: Normal (20 FPS)"
+        elif point_count <= 100:
+            # Medium point clouds: 15 FPS (67ms)
+            new_interval = 67
+            performance_status = "Performance: Optimized (15 FPS)"
+        elif point_count <= 170:
+            # Large point clouds: 10 FPS (100ms)
+            new_interval = 100
+            performance_status = "Performance: Adaptive (10 FPS)"
+        else:
+            # Very large point clouds: 5 FPS (200ms)
+            new_interval = 200
+            performance_status = "Performance: High Load (5 FPS)"
             
+        # Update performance status
+        self.performance_status_label.setText(performance_status)
+            
+        # Only change timer if interval changed significantly
+        if abs(new_interval - self.visualization_update_interval) > 10:
+            self.visualization_update_interval = new_interval
+            self.update_timer.stop()
+            self.update_timer.start(new_interval)
+            
+            fps = 1000 / new_interval
+            self.log_status(f"Adjusted VISUALIZATION to {fps:.1f} FPS for {point_count} points (data reception unaffected)")
+
     def update_visualization(self):
-        """Update both 3D and 2D visualizations"""
+        """
+        Update both 3D and 2D visualizations with performance optimizations.
+        
+        NOTE: This method only handles GUI rendering. Radar data reception happens 
+        independently in RadarDataThread at full 20Hz rate. This method reads the 
+        latest received data and updates the display at an adaptive rate.
+        """
+        current_time = time.time() * 1000  # milliseconds
+        
         # Handle playback if active
         if self.data_recorder.is_playing:
             playback_frame = self.data_recorder.get_next_playback_frame()
@@ -925,15 +999,16 @@ class RadarGUI(QMainWindow):
                 
                 self.update_playback_status()
         
-        # Update recording statistics
-        if self.data_recorder.is_recording:
+        # Update recording statistics (less frequently for performance)
+        if self.data_recorder.is_recording and current_time - self.last_visualization_update > 200:
             stats = self.data_recorder.get_recording_stats()
             status = f"Recording: {stats['recording_mode']} mode - {stats['frame_count']} frames"
             if stats.get('duration_seconds'):
                 status += f" ({stats['duration_seconds']:.1f}s)"
             self.recording_status_label.setText(status)
         else:
-            self.recording_status_label.setText("Recording: Stopped")
+            if not self.data_recorder.is_recording:
+                self.recording_status_label.setText("Recording: Stopped")
             
         # Update 3D and 2D point cloud visualization
         if self.point_cloud_data is not None and len(self.point_cloud_data) > 0:
@@ -942,6 +1017,14 @@ class RadarGUI(QMainWindow):
                 points_array = np.array(self.point_cloud_data)
             else:
                 points_array = self.point_cloud_data
+            
+            # Get current point count for performance adjustment
+            current_point_count = len(points_array)
+            
+            # Adjust update rate based on point count (only check periodically)
+            if abs(current_point_count - self.last_point_count) > 20:
+                self.adjust_update_rate_for_performance(current_point_count)
+                self.last_point_count = current_point_count
             
             # Extract only x,y,z for 3D visualization
             if len(points_array.shape) >= 2 and points_array.shape[1] >= 3:
@@ -953,53 +1036,79 @@ class RadarGUI(QMainWindow):
                 # Fallback: assume it's already in correct format
                 points_3d = points_array
                 
+            # Update 3D visualization
             self.point_scatter.setData(pos=points_3d)
             
-            # Update 2D point cloud (X-Y projection)
+            # Update 2D point cloud (X-Y projection) for combined view only
             if len(points_3d.shape) >= 2 and points_3d.shape[1] >= 2:
                 x_points = points_3d[:, 0]
                 y_points = points_3d[:, 1]
                 
-                self.point_scatter_2d.setData(x_points, y_points)
-                
-                # Update combined view
+                # Update combined view 2D plot
                 if hasattr(self, 'point_scatter_2d_combined'):
                     self.point_scatter_2d_combined.setData(x_points, y_points)
                 
-                # Enable dynamic auto-range for 2D plots for better visualization
-                # try:
-                #     if len(x_points) > 0 and len(y_points) > 0:
-                #         margin = 2  # meters margin around points
-                #         xmin, xmax = np.min(x_points), np.max(x_points)
-                #         ymin, ymax = np.min(y_points), np.max(y_points)
-                        
-                #         # Ensure minimum range for visibility
-                #         if xmax - xmin < 1:
-                #             xmin, xmax = xmin - 1, xmax + 1
-                #         if ymax - ymin < 1:
-                #             ymin, ymax = ymin - 1, ymax + 1
-                            
-                #         self.plot_2d.setXRange(xmin - margin, xmax + margin)
-                #         self.plot_2d.setYRange(max(0.0, float(ymin - margin)), ymax + margin)  # Keep y >= 0
-
-                #         # Apply the same ranges to the combined 2D view if it exists
-                #         if hasattr(self, 'plot_2d_combined'):
-                #             self.plot_2d_combined.setXRange(xmin - margin, xmax + margin)
-                #             self.plot_2d_combined.setYRange(max(0.0, float(ymin - margin)), ymax + margin)
-                # except Exception:
-                #     # In case of numerical issues, ignore and keep previous range
-                #     pass
-        else:
-            # No point cloud data, clear displays
-            self.point_scatter.setData(pos=np.array([[0, 0, 0]]))
-            self.point_scatter_2d.setData([], [])
-            
-            # Also clear combined view
-            if hasattr(self, 'point_scatter_2d_combined'):
-                self.point_scatter_2d_combined.setData([], [])
+                # Only enforce ranges occasionally to reduce CPU load for combined view
+                if not self.skip_range_enforcement and hasattr(self, 'plot_2d_combined'):
+                    self.plot_2d_combined.setXRange(-20, 20)
+                    self.plot_2d_combined.setYRange(-5, 35)
                     
-
+                    # Skip range enforcement for a few frames if we have large point clouds
+                    if current_point_count > 150:
+                        self.skip_range_enforcement = True
+                        # Re-enable after some frames
+                        QTimer.singleShot(1000, lambda: setattr(self, 'skip_range_enforcement', False))
+        else:
+            # No point cloud data, clear displays (but only occasionally for performance)
+            if current_time - self.last_visualization_update > 500:  # Only clear every 500ms
+                self.point_scatter.setData(pos=np.array([[0, 0, 0]]))
+                
+                # Clear combined view
+                if hasattr(self, 'point_scatter_2d_combined'):
+                    self.point_scatter_2d_combined.setData([], [])
+                    
+                # Maintain ranges for combined view
+                if not self.skip_range_enforcement and hasattr(self, 'plot_2d_combined'):
+                    self.plot_2d_combined.setXRange(-20, 20)
+                    self.plot_2d_combined.setYRange(-5, 35)
         
+        self.last_visualization_update = current_time
+        
+    def enforce_2d_ranges(self):
+        """Enforce the correct range for combined 2D plot to prevent auto-scaling (optimized for performance)"""
+        # Skip enforcement if we're in skip mode or have large point clouds
+        if self.skip_range_enforcement:
+            return
+            
+        try:
+            # Target ranges for combined view (origin at center)
+            target_x = [-20, 20]
+            target_y = [-5, 35]
+            tolerance = 1.0  # Allow some drift before correcting
+            
+            # Combined 2D plot - only correct if significantly off
+            if hasattr(self, 'plot_2d_combined'):
+                current_x_range = self.plot_2d_combined.viewRange()[0]
+                current_y_range = self.plot_2d_combined.viewRange()[1]
+                
+                x_drift = (abs(current_x_range[0] - target_x[0]) > tolerance or 
+                          abs(current_x_range[1] - target_x[1]) > tolerance)
+                y_drift = (abs(current_y_range[0] - target_y[0]) > tolerance or 
+                          abs(current_y_range[1] - target_y[1]) > tolerance)
+                
+                if x_drift or y_drift:
+                    if x_drift:
+                        self.plot_2d_combined.setXRange(target_x[0], target_x[1])
+                    if y_drift:
+                        self.plot_2d_combined.setYRange(target_y[0], target_y[1])
+                    
+                    # Refresh origin markers after range correction
+                    self.refresh_origin_markers()
+                    
+        except Exception:
+            # Ignore any errors during range enforcement to prevent crashes
+            pass
+
     def handle_error(self, error_msg):
         """Handle error messages from the radar thread"""
         self.log_status(f"ERROR: {error_msg}")
@@ -1208,7 +1317,6 @@ class RadarGUI(QMainWindow):
                 self.log_status("Switched back to live webcam feed")
             else:
                 # No webcam running, clear displays
-                self.webcam_label.setText("Webcam feed will appear here")
                 self.webcam_label_combined.setText("Webcam feed will appear here")
     
     def on_playback_speed_changed(self, value):
@@ -1235,6 +1343,13 @@ class RadarGUI(QMainWindow):
         """Clean up when closing the application"""
         self.radar_thread.stop()
         self.webcam_thread.stop()
+        
+        # Stop timers
+        if hasattr(self, 'update_timer'):
+            self.update_timer.stop()
+        if hasattr(self, 'range_timer'):
+            self.range_timer.stop()
+            
         event.accept()
 
 def main():
