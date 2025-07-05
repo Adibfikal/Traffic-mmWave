@@ -291,7 +291,7 @@ class IMM_Filter:
             inv_cov = la.inv(cov)
             exp_term = -0.5 * diff.T @ inv_cov @ diff
             norm_term = 1.0 / np.sqrt((2 * np.pi) ** k * la.det(cov))
-            return norm_term * np.exp(exp_term)
+            return float(norm_term * np.exp(exp_term))
         except:
             return 1e-10
 
@@ -355,7 +355,7 @@ class EnhancedTrack:
     @property
     def speed(self) -> float:
         """Current speed magnitude"""
-        return np.linalg.norm(self.velocity)
+        return float(np.linalg.norm(self.velocity))
     
     @property
     def acceleration(self) -> np.ndarray:
@@ -421,7 +421,7 @@ class EnhancedTrack:
         innovation_cov = H @ self.current_covariance @ H.T + measurement_noise
         
         try:
-            mahal_dist = np.sqrt(innovation.T @ la.inv(innovation_cov) @ innovation)
+            mahal_dist = float(np.sqrt(innovation.T @ la.inv(innovation_cov) @ innovation))
             self.mahalanobis_distances.append(mahal_dist)
         except:
             mahal_dist = 100.0
@@ -464,14 +464,35 @@ class EnhancedTrack:
         
         self.confidence = np.clip(confidence, 0.0, 1.0)
     
-    def should_delete(self, max_age: int = 30, max_misses: int = 10, min_confidence: float = 0.1) -> bool:
-        """Determine if track should be deleted"""
-        if self.age > max_age:
+    def should_delete(self, current_time: float, 
+                     max_coast_time: float = 1.0, 
+                     max_lifetime: float = 30.0, 
+                     min_confidence: float = 0.1,
+                     min_confirmed_time: float = 0.3) -> bool:
+        """Determine if track should be deleted - TIME-BASED deletion logic"""
+        
+        # Calculate time metrics
+        time_since_update = current_time - self.last_update_time
+        track_lifetime = current_time - self.created_time
+        
+        # Delete if track has been coasting (no updates) too long
+        if time_since_update > max_coast_time:
             return True
-        if self.consecutive_misses > max_misses:
+        
+        # Delete if track has been alive too long
+        if track_lifetime > max_lifetime:
             return True
-        if self.confidence < min_confidence and self.age > 5:
+        
+        # Delete if track has poor confidence after being alive for minimum time
+        if (track_lifetime > min_confirmed_time and 
+            self.confidence < min_confidence):
             return True
+        
+        # NEW: Delete tracks that never got confirmed and are old enough
+        if (track_lifetime > 2.0 and  # 2 seconds old
+            self.hits < 3):  # Still not confirmed
+            return True
+        
         return False
     
     def get_predicted_position(self, prediction_time: float) -> np.ndarray:

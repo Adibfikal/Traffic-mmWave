@@ -303,16 +303,26 @@ class RadarGUI(QMainWindow):
         
         # Initialize enhanced tracking system
         self.tracker = EnhancedHDBSCANTracker(
-            min_cluster_size=3,
-            min_samples=2,
-            cluster_selection_epsilon=0.5,
-            max_tracking_distance=2.0
+            min_cluster_size=8,                    # Increased for automotive
+            min_samples=4,                         # Increased for automotive  
+            cluster_selection_epsilon=1.0,         # Increased for automotive
+            max_tracking_distance=6.0,             # Increased for automotive
+            track_confirmation_threshold=3,
+            track_deletion_time=30.0,              # 30 seconds max lifetime
+            track_coast_time=1.0,                  # 1 second coast time
+            min_track_confidence=0.1,
+            min_detection_points=5,                # Quality filter
+            min_cluster_probability=0.6,           # Quality filter
+            expected_fps=10.0                      # Typical radar frame rate
         )
         
         # Initialize enhanced visualization (will be set up after GL widget creation)
         self.enhanced_visualization = None
         self.tracking_enabled = False
         self.tracking_results = None
+        
+        # NEW: Track management parameters
+        self.track_confirmation_threshold = 3  # Minimum hits for confirmed track
         
         # New features - managers for bounding boxes and trails
         self.bounding_box_manager = None
@@ -671,25 +681,74 @@ class RadarGUI(QMainWindow):
         self.tracking_btn.toggled.connect(self.toggle_tracking)
         tracking_layout.addWidget(self.tracking_btn, 0, 0, 1, 2)
         
-        # Tracking parameters
+        # Basic tracking parameters
         tracking_layout.addWidget(QLabel("Min Cluster Size:"), 1, 0)
         self.min_cluster_size_spin = QSpinBox()
-        self.min_cluster_size_spin.setMinimum(2)
-        self.min_cluster_size_spin.setMaximum(20)
-        self.min_cluster_size_spin.setValue(3)
+        self.min_cluster_size_spin.setMinimum(3)
+        self.min_cluster_size_spin.setMaximum(30)
+        self.min_cluster_size_spin.setValue(8)  # Updated default for automotive
         self.min_cluster_size_spin.valueChanged.connect(self.update_tracking_params)
         tracking_layout.addWidget(self.min_cluster_size_spin, 1, 1)
         
         tracking_layout.addWidget(QLabel("Max Track Distance:"), 2, 0)
         self.max_track_distance_spin = QSpinBox()
         self.max_track_distance_spin.setMinimum(1)
-        self.max_track_distance_spin.setMaximum(10)
-        self.max_track_distance_spin.setValue(2)
+        self.max_track_distance_spin.setMaximum(20)
+        self.max_track_distance_spin.setValue(6)  # Updated default for automotive
         self.max_track_distance_spin.valueChanged.connect(self.update_tracking_params)
         tracking_layout.addWidget(self.max_track_distance_spin, 2, 1)
         
         tracking_group.setLayout(tracking_layout)
         layout.addWidget(tracking_group)
+        
+        # NEW: Detection Quality Parameters
+        quality_group = QGroupBox("Detection Quality Filters")
+        quality_layout = QGridLayout()
+        
+        quality_layout.addWidget(QLabel("Min Detection Points:"), 0, 0)
+        self.min_detection_points_spin = QSpinBox()
+        self.min_detection_points_spin.setMinimum(3)
+        self.min_detection_points_spin.setMaximum(20)
+        self.min_detection_points_spin.setValue(5)
+        self.min_detection_points_spin.valueChanged.connect(self.update_tracking_params)
+        quality_layout.addWidget(self.min_detection_points_spin, 0, 1)
+        
+        quality_layout.addWidget(QLabel("Min Cluster Probability:"), 1, 0)
+        self.min_cluster_probability_spin = QSpinBox()
+        self.min_cluster_probability_spin.setMinimum(10)
+        self.min_cluster_probability_spin.setMaximum(100)
+        self.min_cluster_probability_spin.setValue(60)  # Represents 0.6 (value/100)
+        self.min_cluster_probability_spin.setSuffix(" (%)")
+        self.min_cluster_probability_spin.valueChanged.connect(self.update_tracking_params)
+        quality_layout.addWidget(self.min_cluster_probability_spin, 1, 1)
+        
+        quality_group.setLayout(quality_layout)
+        layout.addWidget(quality_group)
+        
+        # NEW: Time-Based Track Management
+        time_group = QGroupBox("Track Lifecycle (Time-Based)")
+        time_layout = QGridLayout()
+        
+        time_layout.addWidget(QLabel("Coast Time (ms):"), 0, 0)
+        self.track_coast_time_spin = QSpinBox()
+        self.track_coast_time_spin.setMinimum(200)
+        self.track_coast_time_spin.setMaximum(5000)
+        self.track_coast_time_spin.setValue(1000)  # 1 second
+        self.track_coast_time_spin.setSuffix(" ms")
+        self.track_coast_time_spin.valueChanged.connect(self.update_tracking_params)
+        time_layout.addWidget(self.track_coast_time_spin, 0, 1)
+        
+        time_layout.addWidget(QLabel("Max Lifetime (s):"), 1, 0)
+        self.track_deletion_time_spin = QSpinBox()
+        self.track_deletion_time_spin.setMinimum(5)
+        self.track_deletion_time_spin.setMaximum(120)
+        self.track_deletion_time_spin.setValue(30)  # 30 seconds
+        self.track_deletion_time_spin.setSuffix(" s")
+        self.track_deletion_time_spin.valueChanged.connect(self.update_tracking_params)
+        time_layout.addWidget(self.track_deletion_time_spin, 1, 1)
+        
+        time_group.setLayout(time_layout)
+        layout.addWidget(time_group)
         
         # Advanced tracking parameters
         advanced_group = QGroupBox("Advanced Parameters")
@@ -699,7 +758,7 @@ class RadarGUI(QMainWindow):
         self.min_samples_spin = QSpinBox()
         self.min_samples_spin.setMinimum(1)
         self.min_samples_spin.setMaximum(20)
-        self.min_samples_spin.setValue(2)
+        self.min_samples_spin.setValue(4)  # Updated default for automotive
         self.min_samples_spin.valueChanged.connect(self.update_tracking_params)
         advanced_layout.addWidget(self.min_samples_spin, 0, 1)
         
@@ -707,7 +766,7 @@ class RadarGUI(QMainWindow):
         self.cluster_epsilon_spin = QSpinBox()
         self.cluster_epsilon_spin.setMinimum(1)
         self.cluster_epsilon_spin.setMaximum(50)
-        self.cluster_epsilon_spin.setValue(5)  # Represents 0.5 (value/10)
+        self.cluster_epsilon_spin.setValue(10)  # Represents 1.0 (value/10)
         self.cluster_epsilon_spin.setSuffix(" (×0.1)")
         self.cluster_epsilon_spin.valueChanged.connect(self.update_tracking_params)
         advanced_layout.addWidget(self.cluster_epsilon_spin, 1, 1)
@@ -716,7 +775,7 @@ class RadarGUI(QMainWindow):
         self.min_confidence_spin = QSpinBox()
         self.min_confidence_spin.setMinimum(1)
         self.min_confidence_spin.setMaximum(100)
-        self.min_confidence_spin.setValue(30)  # Represents 0.3 (value/100)
+        self.min_confidence_spin.setValue(10)  # Represents 0.1 (value/100)
         self.min_confidence_spin.setSuffix(" (%)")
         self.min_confidence_spin.valueChanged.connect(self.update_tracking_params)
         advanced_layout.addWidget(self.min_confidence_spin, 2, 1)
@@ -724,21 +783,44 @@ class RadarGUI(QMainWindow):
         advanced_group.setLayout(advanced_layout)
         layout.addWidget(advanced_group)
         
+        # NEW: Performance Monitoring
+        performance_group = QGroupBox("Performance Monitor")
+        performance_layout = QVBoxLayout()
+        
+        self.debug_stats_text = QTextEdit()
+        self.debug_stats_text.setReadOnly(True)
+        self.debug_stats_text.setMaximumHeight(120)
+        self.debug_stats_text.setFont(self.status_text.font())  # Use monospace font
+        performance_layout.addWidget(self.debug_stats_text)
+        
+        # Reset stats button
+        self.reset_stats_btn = QPushButton("Reset Statistics")
+        self.reset_stats_btn.clicked.connect(self.reset_tracking_stats)
+        performance_layout.addWidget(self.reset_stats_btn)
+        
+        performance_group.setLayout(performance_layout)
+        layout.addWidget(performance_group)
+        
         # Tracking information
-        info_group = QGroupBox("Tracking Information")
+        info_group = QGroupBox("Enhanced Tracking Information")
         info_layout = QVBoxLayout()
         
         info_text = QLabel(
-            "HDBSCAN + Particle Filter Tracking:\n\n"
-            "• Min Cluster Size: Minimum points to form a cluster\n"
-            "• Max Track Distance: Maximum distance for data association\n"
-            "• Min Samples: Minimum samples for HDBSCAN core points\n"
-            "• Cluster Epsilon: Distance threshold for cluster selection\n"
-            "• Min Confidence: Minimum confidence for valid detections\n\n"
-            "Tracked objects appear as colored markers in the 3D visualization."
+            "TI-Style HDBSCAN + Particle Filter Tracking:\n\n"
+            "DETECTION QUALITY:\n"
+            "• Min Detection Points: Minimum radar points to form a detection\n"
+            "• Min Cluster Probability: Minimum HDBSCAN confidence for valid detection\n\n"
+            "TIME-BASED MANAGEMENT:\n"
+            "• Coast Time: Maximum time without updates before track deletion\n"
+            "• Max Lifetime: Maximum total track age regardless of updates\n\n"
+            "CLUSTERING:\n"
+            "• Min Cluster Size: Minimum points to form a cluster (automotive: 8+)\n"
+            "• Max Track Distance: Maximum distance for data association (automotive: 6m)\n"
+            "• Cluster Epsilon: Distance threshold for cluster selection\n\n"
+            "Confirmed tracks appear as colored markers with bounding boxes and trails."
         )
         info_text.setWordWrap(True)
-        info_text.setStyleSheet("QLabel { color: gray; font-size: 10px; }")
+        info_text.setStyleSheet("QLabel { color: gray; font-size: 9px; }")
         info_layout.addWidget(info_text)
         
         info_group.setLayout(info_layout)
@@ -1207,11 +1289,76 @@ class RadarGUI(QMainWindow):
             if hasattr(self, 'cluster_epsilon_spin'):
                 params['cluster_selection_epsilon'] = self.cluster_epsilon_spin.value() / 10.0
             
+            # NEW: Add detection quality parameters
+            if hasattr(self, 'min_detection_points_spin'):
+                params['min_detection_points'] = self.min_detection_points_spin.value()
+            if hasattr(self, 'min_cluster_probability_spin'):
+                params['min_cluster_probability'] = self.min_cluster_probability_spin.value() / 100.0
+            
+            # NEW: Add time-based parameters
+            if hasattr(self, 'track_coast_time_spin'):
+                params['track_coast_time'] = self.track_coast_time_spin.value() / 1000.0  # Convert ms to seconds
+            if hasattr(self, 'track_deletion_time_spin'):
+                params['track_deletion_time'] = float(self.track_deletion_time_spin.value())
+            
             self.tracker.update_parameters(**params)
             
-            self.log_status(f"Updated tracking params: min_cluster_size={params['min_cluster_size']}, "
-                          f"max_distance={params['max_tracking_distance']}")
+            self.log_status(f"Updated tracking params: {len(params)} parameters")
             print(f"TRACKING: Updated parameters - {params}")
+    
+    def reset_tracking_stats(self):
+        """Reset tracking statistics and counters"""
+        if hasattr(self, 'tracker'):
+            # Reset tracker statistics
+            self.tracker.frame_count = 0
+            self.tracker.total_detections = 0
+            self.tracker.total_tracks_created = 0
+            self.tracker.total_tracks_deleted = 0
+            
+            # Clear debug stats
+            for key in self.tracker.debug_stats:
+                self.tracker.debug_stats[key] = 0
+            
+            # Clear performance monitoring
+            self.tracker.processing_times.clear()
+            self.tracker.detection_counts.clear()
+            
+            # Clear association stats
+            if hasattr(self.tracker, 'associator'):
+                self.tracker.associator.association_distances.clear()
+                self.tracker.associator.association_success_rate.clear()
+            
+            self.log_status("Tracking statistics reset")
+            self.debug_stats_text.clear()
+    
+    def update_debug_stats_display(self):
+        """Update the debug statistics display"""
+        if hasattr(self, 'tracker') and hasattr(self, 'debug_stats_text'):
+            try:
+                # Get latest performance stats
+                perf_stats = self.tracker.get_performance_statistics()
+                debug_stats = perf_stats.get('debug_stats', {})
+                cluster_info = perf_stats.get('cluster_info', {})
+                association_stats = perf_stats.get('association_stats', {})
+                
+                # Format debug information
+                debug_text = f"""FRAME {perf_stats.get('frame_count', 0)} PERFORMANCE:
+Points: {debug_stats.get('points_received', 0)} → {debug_stats.get('points_after_filter', 0)} (filtered)
+Clusters: {debug_stats.get('raw_clusters', 0)} → {debug_stats.get('quality_filtered_clusters', 0)} (quality)
+Detections: {debug_stats.get('final_detections', 0)}
+Associations: {debug_stats.get('successful_associations', 0)}/{debug_stats.get('associations_attempted', 0)}
+Tracks: {debug_stats.get('active_tracks', 0)} active, {debug_stats.get('confirmed_tracks', 0)} confirmed
+Created: {debug_stats.get('new_tracks_created', 0)}, Deleted: {debug_stats.get('tracks_deleted', 0)}
+
+CLUSTER PARAMS: size={cluster_info.get('min_cluster_size', 0)}, ε={cluster_info.get('epsilon', 0):.1f}
+ASSOCIATION: max_dist={association_stats.get('max_association_distance', 0):.1f}m
+PERFORMANCE: {perf_stats.get('avg_processing_time', 0)*1000:.1f}ms/frame"""
+                
+                self.debug_stats_text.setPlainText(debug_text)
+                
+            except Exception as e:
+                # Handle any errors gracefully
+                self.debug_stats_text.setPlainText(f"Debug stats error: {str(e)}")
     
     def toggle_webcam(self):
         """Start or stop webcam capture"""
@@ -1792,13 +1939,34 @@ class RadarGUI(QMainWindow):
         if self.tracking_enabled and self.tracking_results and 'tracks' in self.tracking_results:
             tracks = self.tracking_results['tracks']
             if tracks:
-                track_positions = np.array([track['position'] for track in tracks])
-                
-                # Create colors based on motion state
+                # ENHANCED: Only show CONFIRMED tracks for bounding boxes and trails
+                confirmed_tracks = []
+                track_positions = []
                 track_colors = []
+                
                 for track in tracks:
+                    track_id = track.get('id', track.get('track_id'))
+                    # Check if track is confirmed (hits >= threshold AND age >= min_time)
+                    hits = track.get('hits', 0)
+                    age_frames = track.get('age', 0)
+                    
+                    # Estimate track age in seconds (assuming ~10 Hz)
+                    estimated_age_seconds = age_frames * 0.1
+                    
+                    is_confirmed = (hits >= self.track_confirmation_threshold and 
+                                  estimated_age_seconds >= 0.3)
+                    
+                    if is_confirmed:
+                        confirmed_tracks.append(track)
+                    
+                    # Always show track positions (but only confirmed get enhanced viz)
+                    track_positions.append(track['position'])
+                    
+                    # Color based on confirmation status and motion state
                     motion_state = track.get('motion_state', 'constant_velocity')
-                    if motion_state == 'stationary':
+                    if not is_confirmed:
+                        color = [0.5, 0.5, 0.5, 0.7]  # Gray for unconfirmed
+                    elif motion_state == 'stationary':
                         color = [1, 0, 0, 1]  # Red for stationary
                     elif motion_state == 'maneuvering':
                         color = [0, 0, 1, 1]  # Blue for maneuvering
@@ -1806,6 +1974,7 @@ class RadarGUI(QMainWindow):
                         color = [0, 1, 0, 1]  # Green for constant velocity
                     track_colors.append(color)
                 
+                track_positions = np.array(track_positions)
                 track_colors = np.array(track_colors)
                 track_size = self.track_size_slider.value() / 10.0
                 
@@ -1814,12 +1983,23 @@ class RadarGUI(QMainWindow):
                     self.track_scatter.setData(pos=track_positions, color=track_colors, size=track_size)
                 if hasattr(self, 'track_scatter_3d_combined'):
                     self.track_scatter_3d_combined.setData(pos=track_positions, color=track_colors, size=track_size)
+                
+                # Only update enhanced visualizations for CONFIRMED tracks
+                if confirmed_tracks:
+                    self.update_enhanced_visualizations({'tracks': confirmed_tracks})
         else:
             # Clear tracking displays when no tracking data
             if hasattr(self, 'track_scatter'):
                 self.track_scatter.setData(pos=np.array([[0, 0, 0]]), color=np.array([[1, 0, 0, 0]]), size=0.1)
             if hasattr(self, 'track_scatter_3d_combined'):
                 self.track_scatter_3d_combined.setData(pos=np.array([[0, 0, 0]]), color=np.array([[1, 0, 0, 0]]), size=0.1)
+        
+        # NEW: Update debug statistics display every 10 visualization updates
+        if not hasattr(self, '_debug_update_counter'):
+            self._debug_update_counter = 0
+        self._debug_update_counter += 1
+        if self._debug_update_counter % 10 == 0:
+            self.update_debug_stats_display()
     
     def enforce_2d_ranges(self):
         """Enforce the correct camera view for combined 3D plot"""

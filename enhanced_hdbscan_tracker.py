@@ -20,17 +20,23 @@ class AdaptiveHDBSCANClusterer:
     """Adaptive HDBSCAN clustering with dynamic parameter adjustment"""
     
     def __init__(self, 
-                 base_min_cluster_size: int = 3,
-                 base_min_samples: int = 2,
-                 base_cluster_selection_epsilon: float = 0.5,
+                 base_min_cluster_size: int = 8,  # Increased from 3 for automotive
+                 base_min_samples: int = 4,      # Increased from 2 for automotive
+                 base_cluster_selection_epsilon: float = 1.0,  # Increased from 0.5 for automotive
                  density_adaptation_factor: float = 0.3,
-                 motion_adaptation_factor: float = 0.2):
+                 motion_adaptation_factor: float = 0.2,
+                 min_detection_points: int = 5,   # NEW: Minimum points to form detection
+                 min_cluster_probability: float = 0.6):  # NEW: Minimum cluster probability
         
         self.base_min_cluster_size = base_min_cluster_size
         self.base_min_samples = base_min_samples
         self.base_cluster_selection_epsilon = base_cluster_selection_epsilon
         self.density_adaptation_factor = density_adaptation_factor
         self.motion_adaptation_factor = motion_adaptation_factor
+        
+        # NEW: Detection quality filters
+        self.min_detection_points = min_detection_points
+        self.min_cluster_probability = min_cluster_probability
         
         # Adaptive parameters
         self.current_min_cluster_size = base_min_cluster_size
@@ -46,6 +52,14 @@ class AdaptiveHDBSCANClusterer:
         self.last_cluster_count = 0
         self.last_noise_points = 0
         self.last_point_density = 0.0
+        
+        # NEW: Debug counters
+        self.debug_stats = {
+            'raw_clusters': 0,
+            'filtered_clusters': 0,
+            'points_filtered': 0,
+            'probability_filtered': 0
+        }
         
     def adapt_parameters(self, point_cloud: np.ndarray, existing_tracks: List[EnhancedTrack]):
         """Adapt HDBSCAN parameters based on point cloud characteristics and track states"""
@@ -63,17 +77,17 @@ class AdaptiveHDBSCANClusterer:
             
         self.point_density_history.append(point_density)
         
-        # Adapt based on point density
+        # Adapt based on point density - MORE CONSERVATIVE for automotive
         if len(self.point_density_history) >= 3:
             density_trend = np.mean(list(self.point_density_history)[-3:])
             
-            # If density is high, allow smaller clusters
-            if density_trend > 10.0:
-                self.current_min_cluster_size = max(2, self.base_min_cluster_size - 1)
-                self.current_min_samples = max(1, self.base_min_samples - 1)
+            # If density is very high, slightly reduce cluster size
+            if density_trend > 20.0:
+                self.current_min_cluster_size = max(6, self.base_min_cluster_size - 2)
+                self.current_min_samples = max(3, self.base_min_samples - 1)
             # If density is low, require larger clusters
-            elif density_trend < 3.0:
-                self.current_min_cluster_size = self.base_min_cluster_size + 1
+            elif density_trend < 5.0:
+                self.current_min_cluster_size = self.base_min_cluster_size + 2
                 self.current_min_samples = self.base_min_samples + 1
             else:
                 self.current_min_cluster_size = self.base_min_cluster_size
@@ -90,10 +104,10 @@ class AdaptiveHDBSCANClusterer:
             # For moving objects, use looser clustering
             self.current_epsilon = self.base_cluster_selection_epsilon * 1.2
         
-        # Clamp parameters to reasonable ranges
-        self.current_min_cluster_size = np.clip(self.current_min_cluster_size, 2, 10)
-        self.current_min_samples = np.clip(self.current_min_samples, 1, 5)
-        self.current_epsilon = np.clip(self.current_epsilon, 0.1, 2.0)
+        # Clamp parameters to reasonable ranges for automotive
+        self.current_min_cluster_size = np.clip(self.current_min_cluster_size, 5, 20)
+        self.current_min_samples = np.clip(self.current_min_samples, 2, 10)
+        self.current_epsilon = np.clip(self.current_epsilon, 0.3, 3.0)
     
     def cluster_points(self, point_cloud: np.ndarray, existing_tracks: List[EnhancedTrack]) -> Tuple[np.ndarray, np.ndarray]:
         """Perform adaptive HDBSCAN clustering"""
@@ -122,6 +136,9 @@ class AdaptiveHDBSCANClusterer:
         
         self.cluster_count_history.append(self.last_cluster_count)
         
+        # Reset debug stats
+        self.debug_stats['raw_clusters'] = self.last_cluster_count
+        
         # Get cluster probabilities if available
         probabilities = getattr(clusterer, 'probabilities_', np.ones(len(point_cloud)))
         
@@ -135,36 +152,47 @@ class AdaptiveHDBSCANClusterer:
             'epsilon': self.current_epsilon,
             'last_cluster_count': self.last_cluster_count,
             'last_noise_points': self.last_noise_points,
-            'avg_point_density': np.mean(list(self.point_density_history)) if self.point_density_history else 0.0
+            'avg_point_density': np.mean(list(self.point_density_history)) if self.point_density_history else 0.0,
+            'debug_stats': self.debug_stats.copy()
         }
 
 class RobustDataAssociator:
     """Robust data association using Mahalanobis distance and track confidence"""
     
     def __init__(self, 
-                 max_association_distance: float = 5.0,
-                 mahalanobis_threshold: float = 9.21,  # Chi-squared 95% confidence for 3D
+                 max_association_distance: float = 6.0,  # Increased from 5.0 for automotive
+                 mahalanobis_threshold: float = 12.0,    # Increased from 9.21 for automotive
                  confidence_weight: float = 0.3,
-                 motion_state_bonus: float = 0.2):
+                 motion_state_bonus: float = 0.2,
+                 velocity_gate_factor: float = 2.0):     # NEW: Velocity-based gating
         
         self.max_association_distance = max_association_distance
         self.mahalanobis_threshold = mahalanobis_threshold
         self.confidence_weight = confidence_weight
         self.motion_state_bonus = motion_state_bonus
+        self.velocity_gate_factor = velocity_gate_factor
         
         # Association statistics
         self.association_distances = deque(maxlen=100)
         self.association_success_rate = deque(maxlen=50)
         
+        # NEW: Debug counters
+        self.debug_stats = {
+            'total_associations_attempted': 0,
+            'successful_associations': 0,
+            'distance_rejected': 0,
+            'mahalanobis_rejected': 0
+        }
+        
     def calculate_association_cost(self, track: EnhancedTrack, detection: np.ndarray, 
-                                 detection_covariance: np.ndarray) -> float:
+                                 detection_covariance: np.ndarray, dt: float = 0.1) -> float:
         """Calculate comprehensive association cost between track and detection"""
         
-        # Predict track position
-        predicted_pos = track.position
+        # NEW: Predict track position using velocity (velocity-aware gating)
+        predicted_pos = track.position + track.velocity * dt
         
         # Calculate Mahalanobis distance
-        innovation = detection - predicted_pos
+        innovation = detection - predicted_pos  # Use predicted position, not current
         
         # Combined covariance: track uncertainty + detection uncertainty
         track_pos_cov = track.current_covariance[0:3, 0:3]
@@ -175,9 +203,11 @@ class RobustDataAssociator:
             mahal_dist = np.sqrt(mahal_dist_squared)
         except la.LinAlgError:
             mahal_dist = 100.0  # Very high cost for singular covariance
+            self.debug_stats['mahalanobis_rejected'] += 1
         
         # Base cost from Mahalanobis distance
         if mahal_dist > self.mahalanobis_threshold:
+            self.debug_stats['mahalanobis_rejected'] += 1
             return float('inf')  # Reject association
         
         base_cost = mahal_dist
@@ -200,7 +230,7 @@ class RobustDataAssociator:
         elif track.current_motion_state == MotionState.CONSTANT_VELOCITY:
             # Check if detection is consistent with predicted velocity
             if len(track.velocity_history) >= 2:
-                expected_pos = track.position + track.velocity * 0.1  # Assume 0.1s dt
+                expected_pos = track.position + track.velocity * dt
                 velocity_consistency = np.linalg.norm(detection - expected_pos)
                 motion_bonus = velocity_consistency * 0.3
         
@@ -220,8 +250,15 @@ class RobustDataAssociator:
     
     def associate_tracks_to_detections(self, tracks: List[EnhancedTrack], 
                                      detections: List[np.ndarray],
-                                     detection_covariances: List[np.ndarray]) -> Tuple[List[Tuple[int, int]], List[int], List[int]]:
+                                     detection_covariances: List[np.ndarray],
+                                     dt: float = 0.1) -> Tuple[List[Tuple[int, int]], List[int], List[int]]:
         """Associate tracks to detections using Hungarian algorithm with robust cost function"""
+        
+        # Reset debug counters
+        self.debug_stats['total_associations_attempted'] = len(tracks) * len(detections)
+        self.debug_stats['successful_associations'] = 0
+        self.debug_stats['distance_rejected'] = 0
+        self.debug_stats['mahalanobis_rejected'] = 0
         
         if not tracks or not detections:
             return [], list(range(len(tracks))), list(range(len(detections)))
@@ -232,12 +269,17 @@ class RobustDataAssociator:
         for i, track in enumerate(tracks):
             for j, detection in enumerate(detections):
                 detection_cov = detection_covariances[j] if j < len(detection_covariances) else np.eye(3)
-                cost = self.calculate_association_cost(track, detection, detection_cov)
+                
+                # NEW: Use velocity-aware distance check
+                predicted_pos = track.position + track.velocity * dt
+                euclidean_dist = np.linalg.norm(detection - predicted_pos)
                 
                 # Only consider associations within maximum distance
-                euclidean_dist = np.linalg.norm(detection - track.position)
                 if euclidean_dist <= self.max_association_distance:
+                    cost = self.calculate_association_cost(track, detection, detection_cov, dt)
                     cost_matrix[i, j] = cost
+                else:
+                    self.debug_stats['distance_rejected'] += 1
         
         # Handle empty cost matrix
         if np.all(cost_matrix == float('inf')):
@@ -251,7 +293,7 @@ class RobustDataAssociator:
             track_indices, detection_indices = linear_sum_assignment(cost_matrix_finite)
         except ValueError:
             # Fallback to simple nearest neighbor
-            return self._fallback_association(tracks, detections)
+            return self._fallback_association(tracks, detections, dt)
         
         # Filter out associations with infinite cost
         valid_associations = []
@@ -268,13 +310,15 @@ class RobustDataAssociator:
         unassociated_detections = [i for i in range(len(detections)) if i not in associated_detections]
         
         # Update success rate
-        success_rate = len(valid_associations) / len(tracks)
+        self.debug_stats['successful_associations'] = len(valid_associations)
+        success_rate = len(valid_associations) / len(tracks) if tracks else 0
         self.association_success_rate.append(success_rate)
         
         return valid_associations, unassociated_tracks, unassociated_detections
     
     def _fallback_association(self, tracks: List[EnhancedTrack], 
-                            detections: List[np.ndarray]) -> Tuple[List[Tuple[int, int]], List[int], List[int]]:
+                            detections: List[np.ndarray],
+                            dt: float = 0.1) -> Tuple[List[Tuple[int, int]], List[int], List[int]]:
         """Fallback association method using simple nearest neighbor"""
         associations = []
         used_detections = set()
@@ -287,7 +331,10 @@ class RobustDataAssociator:
                 if j in used_detections:
                     continue
                 
-                distance = np.linalg.norm(detection - track.position)
+                # Use velocity-aware distance
+                predicted_pos = track.position + track.velocity * dt
+                distance = np.linalg.norm(detection - predicted_pos)
+                
                 if distance < best_distance and distance <= self.max_association_distance:
                     best_distance = distance
                     best_detection = j
@@ -310,41 +357,55 @@ class RobustDataAssociator:
             'avg_association_distance': np.mean(list(self.association_distances)) if self.association_distances else 0.0,
             'avg_success_rate': np.mean(list(self.association_success_rate)) if self.association_success_rate else 0.0,
             'max_association_distance': self.max_association_distance,
-            'mahalanobis_threshold': self.mahalanobis_threshold
+            'mahalanobis_threshold': self.mahalanobis_threshold,
+            'debug_stats': self.debug_stats.copy()
         }
 
 class EnhancedHDBSCANTracker:
     """Enhanced HDBSCAN tracker with IMM filtering and robust data association"""
     
     def __init__(self, 
-                 max_tracking_distance: float = 5.0,
-                 min_cluster_size: int = 3,
-                 min_samples: int = 2,
-                 cluster_selection_epsilon: float = 0.5,
+                 max_tracking_distance: float = 6.0,        # Increased from 5.0
+                 min_cluster_size: int = 8,                 # Increased from 3
+                 min_samples: int = 4,                      # Increased from 2
+                 cluster_selection_epsilon: float = 1.0,    # Increased from 0.5
                  track_confirmation_threshold: int = 3,
-                 track_deletion_threshold: int = 10,
-                 min_track_confidence: float = 0.1):
+                 track_deletion_time: float = 2.0,          # NEW: Time-based deletion (seconds)
+                 track_coast_time: float = 1.0,             # NEW: Coast time before deletion
+                 min_track_confidence: float = 0.1,
+                 min_detection_points: int = 5,             # NEW: Minimum points for detection
+                 min_cluster_probability: float = 0.6,      # NEW: Minimum cluster probability
+                 expected_fps: float = 10.0):               # NEW: Expected radar FPS
         
         # Core components
         self.clusterer = AdaptiveHDBSCANClusterer(
             base_min_cluster_size=min_cluster_size,
             base_min_samples=min_samples,
-            base_cluster_selection_epsilon=cluster_selection_epsilon
+            base_cluster_selection_epsilon=cluster_selection_epsilon,
+            min_detection_points=min_detection_points,
+            min_cluster_probability=min_cluster_probability
         )
         
         self.associator = RobustDataAssociator(
             max_association_distance=max_tracking_distance,
-            mahalanobis_threshold=9.21,  # Chi-squared 95% for 3D
+            mahalanobis_threshold=12.0,  # Increased for automotive
             confidence_weight=0.3,
-            motion_state_bonus=0.2
+            motion_state_bonus=0.2,
+            velocity_gate_factor=2.0
         )
         
-        # Track management
+        # Track management - NEW: Time-based parameters
         self.tracks = []
         self.next_track_id = 1
         self.track_confirmation_threshold = track_confirmation_threshold
-        self.track_deletion_threshold = track_deletion_threshold
+        self.track_deletion_time = track_deletion_time
+        self.track_coast_time = track_coast_time
         self.min_track_confidence = min_track_confidence
+        self.expected_fps = expected_fps
+        
+        # NEW: Detection quality parameters
+        self.min_detection_points = min_detection_points
+        self.min_cluster_probability = min_cluster_probability
         
         # Processing statistics
         self.frame_count = 0
@@ -362,13 +423,32 @@ class EnhancedHDBSCANTracker:
         self.min_height = -5.0
         self.max_height = 5.0
         
+        # NEW: Debug counters
+        self.debug_stats = {
+            'points_received': 0,
+            'points_after_filter': 0,
+            'raw_clusters': 0,
+            'quality_filtered_clusters': 0,
+            'final_detections': 0,
+            'associations_attempted': 0,
+            'successful_associations': 0,
+            'new_tracks_created': 0,
+            'tracks_deleted': 0,
+            'active_tracks': 0,
+            'confirmed_tracks': 0
+        }
+        
     def preprocess_point_cloud(self, point_cloud: np.ndarray) -> np.ndarray:
         """Preprocess point cloud with range and height filtering"""
+        self.debug_stats['points_received'] = len(point_cloud)
+        
         if len(point_cloud) == 0:
+            self.debug_stats['points_after_filter'] = 0
             return point_cloud
         
         # Ensure we work with at least 3D data
         if point_cloud.shape[1] < 3:
+            self.debug_stats['points_after_filter'] = 0
             return np.array([]).reshape(0, point_cloud.shape[1])
         
         # Use only first 3 dimensions for position-based filtering
@@ -384,12 +464,14 @@ class EnhancedHDBSCANTracker:
         combined_mask = range_mask & height_mask
         
         # Return filtered point cloud with original dimensions
-        return point_cloud[combined_mask]
+        filtered_points = point_cloud[combined_mask]
+        self.debug_stats['points_after_filter'] = len(filtered_points)
+        return filtered_points
     
     def extract_detections_from_clusters(self, point_cloud: np.ndarray, 
                                        cluster_labels: np.ndarray, 
                                        cluster_probabilities: np.ndarray) -> Tuple[List[np.ndarray], List[np.ndarray]]:
-        """Extract detections from clustered points"""
+        """Extract detections from clustered points with quality filtering"""
         detections = []
         detection_covariances = []
         
@@ -397,13 +479,26 @@ class EnhancedHDBSCANTracker:
         if -1 in unique_labels:
             unique_labels.remove(-1)  # Remove noise label
         
+        self.debug_stats['raw_clusters'] = len(unique_labels)
+        quality_filtered_count = 0
+        
         for label in unique_labels:
             cluster_mask = cluster_labels == label
             cluster_points = point_cloud[cluster_mask]
             cluster_probs = cluster_probabilities[cluster_mask]
             
-            if len(cluster_points) < 2:
+            # NEW: Quality filtering - minimum points check
+            if len(cluster_points) < self.min_detection_points:
+                self.clusterer.debug_stats['points_filtered'] += 1
                 continue
+            
+            # NEW: Quality filtering - probability check
+            avg_probability = np.mean(cluster_probs)
+            if avg_probability < self.min_cluster_probability:
+                self.clusterer.debug_stats['probability_filtered'] += 1
+                continue
+            
+            quality_filtered_count += 1
             
             # IMPORTANT: Only use first 3 dimensions (x, y, z) for position tracking
             # This prevents dimension mismatch errors in covariance matrix operations
@@ -418,7 +513,7 @@ class EnhancedHDBSCANTracker:
             weighted_cov = np.cov(diff.T, aweights=weights)
             
             # Add minimum uncertainty to avoid singular matrices
-            min_variance = 0.1
+            min_variance = 0.25  # Increased from 0.1 for automotive
             if weighted_cov.ndim == 0:
                 weighted_cov = np.eye(3) * min_variance
             elif weighted_cov.ndim == 2:
@@ -434,11 +529,22 @@ class EnhancedHDBSCANTracker:
             detections.append(centroid)
             detection_covariances.append(weighted_cov)
         
+        self.debug_stats['quality_filtered_clusters'] = quality_filtered_count
+        self.debug_stats['final_detections'] = len(detections)
+        self.clusterer.debug_stats['filtered_clusters'] = quality_filtered_count
+        
         return detections, detection_covariances
     
     def process_frame(self, point_cloud: np.ndarray, timestamp: float) -> Dict[str, Any]:
         """Process a single frame of radar data"""
         start_time = time.time()
+        
+        # Calculate dt from last processing
+        if hasattr(self, 'last_timestamp'):
+            dt = timestamp - self.last_timestamp
+        else:
+            dt = 1.0 / self.expected_fps
+        self.last_timestamp = timestamp
         
         # Preprocess point cloud
         filtered_points = self.preprocess_point_cloud(point_cloud)
@@ -448,7 +554,11 @@ class EnhancedHDBSCANTracker:
             for track in self.tracks:
                 track.predict(timestamp)
             
-            self._manage_tracks()
+            self._manage_tracks(timestamp)
+            
+            # Update debug stats
+            self.debug_stats['active_tracks'] = len(self.tracks)
+            self.debug_stats['confirmed_tracks'] = len([t for t in self.tracks if t.hits >= self.track_confirmation_threshold])
             
             return {
                 'tracks': [track.get_track_info() for track in self.tracks],
@@ -456,13 +566,14 @@ class EnhancedHDBSCANTracker:
                 'associations': [],
                 'processing_time': time.time() - start_time,
                 'cluster_info': self.clusterer.get_cluster_info(),
-                'association_stats': self.associator.get_association_statistics()
+                'association_stats': self.associator.get_association_statistics(),
+                'debug_stats': self.debug_stats.copy()
             }
         
         # Perform adaptive clustering
         cluster_labels, cluster_probabilities = self.clusterer.cluster_points(filtered_points, self.tracks)
         
-        # Extract detections from clusters
+        # Extract detections from clusters with quality filtering
         detections, detection_covariances = self.extract_detections_from_clusters(
             filtered_points, cluster_labels, cluster_probabilities
         )
@@ -471,9 +582,13 @@ class EnhancedHDBSCANTracker:
         for track in self.tracks:
             track.predict(timestamp)
         
-        # Data association
+        # Data association with velocity-aware gating
         associations, unassociated_tracks, unassociated_detections = \
-            self.associator.associate_tracks_to_detections(self.tracks, detections, detection_covariances)
+            self.associator.associate_tracks_to_detections(self.tracks, detections, detection_covariances, dt)
+        
+        # Update debug stats
+        self.debug_stats['associations_attempted'] = len(self.tracks) * len(detections)
+        self.debug_stats['successful_associations'] = len(associations)
         
         # Update associated tracks
         for track_idx, detection_idx in associations:
@@ -484,6 +599,7 @@ class EnhancedHDBSCANTracker:
             )
         
         # Create new tracks for unassociated detections
+        new_tracks_created = 0
         for detection_idx in unassociated_detections:
             new_track = EnhancedTrack(
                 self.next_track_id, 
@@ -493,9 +609,13 @@ class EnhancedHDBSCANTracker:
             self.tracks.append(new_track)
             self.next_track_id += 1
             self.total_tracks_created += 1
+            new_tracks_created += 1
         
-        # Manage track lifecycle
-        self._manage_tracks()
+        self.debug_stats['new_tracks_created'] = new_tracks_created
+        
+        # Manage track lifecycle with time-based deletion
+        tracks_deleted = self._manage_tracks(timestamp)
+        self.debug_stats['tracks_deleted'] = tracks_deleted
         
         # Update statistics
         self.frame_count += 1
@@ -504,6 +624,20 @@ class EnhancedHDBSCANTracker:
         self.processing_times.append(processing_time)
         self.detection_counts.append(len(detections))
         
+        # Update debug stats
+        self.debug_stats['active_tracks'] = len(self.tracks)
+        self.debug_stats['confirmed_tracks'] = len([t for t in self.tracks if t.hits >= self.track_confirmation_threshold])
+        
+        # Print debug info every 20 frames
+        if self.frame_count % 20 == 0:
+            print(f"TRACKER DEBUG Frame {self.frame_count}: "
+                  f"Points: {self.debug_stats['points_received']}→{self.debug_stats['points_after_filter']}, "
+                  f"Clusters: {self.debug_stats['raw_clusters']}→{self.debug_stats['quality_filtered_clusters']}, "
+                  f"Detections: {self.debug_stats['final_detections']}, "
+                  f"Associations: {self.debug_stats['successful_associations']}/{len(self.tracks)}, "
+                  f"Tracks: {self.debug_stats['active_tracks']} ({self.debug_stats['confirmed_tracks']} confirmed), "
+                  f"New: {self.debug_stats['new_tracks_created']}, Deleted: {self.debug_stats['tracks_deleted']}")
+        
         return {
             'tracks': [track.get_track_info() for track in self.tracks],
             'detections': [det.tolist() for det in detections],
@@ -511,6 +645,7 @@ class EnhancedHDBSCANTracker:
             'processing_time': processing_time,
             'cluster_info': self.clusterer.get_cluster_info(),
             'association_stats': self.associator.get_association_statistics(),
+            'debug_stats': self.debug_stats.copy(),
             'frame_stats': {
                 'frame_count': self.frame_count,
                 'total_detections': self.total_detections,
@@ -519,26 +654,34 @@ class EnhancedHDBSCANTracker:
             }
         }
     
-    def _manage_tracks(self):
-        """Manage track lifecycle - deletion of poor quality tracks"""
+    def _manage_tracks(self, current_time: float) -> int:
+        """Manage track lifecycle - TIME-BASED deletion of poor quality tracks"""
         tracks_to_delete = []
         
         for i, track in enumerate(self.tracks):
-            if track.should_delete(
-                max_age=self.track_deletion_threshold * 2,
-                max_misses=self.track_deletion_threshold,
-                min_confidence=self.min_track_confidence
-            ):
+            # NEW: Time-based deletion logic
+            time_since_update = current_time - track.last_update_time
+            
+            # Delete if track has been coasting too long
+            if time_since_update > self.track_coast_time:
+                tracks_to_delete.append(i)
+            # Or if track has been alive too long with poor confidence
+            elif (current_time - track.created_time) > self.track_deletion_time and track.confidence < self.min_track_confidence:
                 tracks_to_delete.append(i)
         
         # Delete tracks in reverse order to maintain indices
         for i in reversed(tracks_to_delete):
             del self.tracks[i]
             self.total_tracks_deleted += 1
+        
+        return len(tracks_to_delete)
     
     def get_confirmed_tracks(self) -> List[EnhancedTrack]:
-        """Get only confirmed tracks (tracks with sufficient hits)"""
-        return [track for track in self.tracks if track.hits >= self.track_confirmation_threshold]
+        """Get only confirmed tracks (tracks with sufficient hits AND time)"""
+        current_time = time.time()
+        return [track for track in self.tracks 
+                if track.hits >= self.track_confirmation_threshold 
+                and (current_time - track.created_time) >= 0.3]  # At least 300ms old
     
     def get_performance_statistics(self) -> Dict[str, Any]:
         """Get comprehensive performance statistics"""
@@ -553,7 +696,8 @@ class EnhancedHDBSCANTracker:
             'avg_detections_per_frame': np.mean(list(self.detection_counts)) if self.detection_counts else 0.0,
             'cluster_info': self.clusterer.get_cluster_info(),
             'association_stats': self.associator.get_association_statistics(),
-            'motion_state_distribution': self._get_motion_state_distribution()
+            'motion_state_distribution': self._get_motion_state_distribution(),
+            'debug_stats': self.debug_stats.copy()
         }
     
     def _get_motion_state_distribution(self) -> Dict[str, int]:
@@ -578,6 +722,21 @@ class EnhancedHDBSCANTracker:
         
         if 'cluster_selection_epsilon' in kwargs:
             self.clusterer.base_cluster_selection_epsilon = kwargs['cluster_selection_epsilon']
+        
+        # NEW: Additional parameters
+        if 'track_coast_time' in kwargs:
+            self.track_coast_time = kwargs['track_coast_time']
+        
+        if 'track_deletion_time' in kwargs:
+            self.track_deletion_time = kwargs['track_deletion_time']
+        
+        if 'min_detection_points' in kwargs:
+            self.min_detection_points = kwargs['min_detection_points']
+            self.clusterer.min_detection_points = kwargs['min_detection_points']
+        
+        if 'min_cluster_probability' in kwargs:
+            self.min_cluster_probability = kwargs['min_cluster_probability']
+            self.clusterer.min_cluster_probability = kwargs['min_cluster_probability']
 
 if __name__ == "__main__":
     # Test the enhanced tracker
