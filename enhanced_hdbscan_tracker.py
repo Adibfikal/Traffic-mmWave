@@ -367,15 +367,23 @@ class EnhancedHDBSCANTracker:
         if len(point_cloud) == 0:
             return point_cloud
         
+        # Ensure we work with at least 3D data
+        if point_cloud.shape[1] < 3:
+            return np.array([]).reshape(0, point_cloud.shape[1])
+        
+        # Use only first 3 dimensions for position-based filtering
+        position_data = point_cloud[:, :3]
+        
         # Calculate range (distance from origin)
-        ranges = np.linalg.norm(point_cloud[:, :2], axis=1)  # Use only x,y for range
+        ranges = np.linalg.norm(position_data[:, :2], axis=1)  # Use only x,y for range
         
         # Apply filters
         range_mask = (ranges >= self.min_range) & (ranges <= self.max_range)
-        height_mask = (point_cloud[:, 2] >= self.min_height) & (point_cloud[:, 2] <= self.max_height)
+        height_mask = (position_data[:, 2] >= self.min_height) & (position_data[:, 2] <= self.max_height)
         
         combined_mask = range_mask & height_mask
         
+        # Return filtered point cloud with original dimensions
         return point_cloud[combined_mask]
     
     def extract_detections_from_clusters(self, point_cloud: np.ndarray, 
@@ -397,12 +405,16 @@ class EnhancedHDBSCANTracker:
             if len(cluster_points) < 2:
                 continue
             
-            # Calculate weighted centroid
-            weights = cluster_probs / np.sum(cluster_probs)
-            centroid = np.average(cluster_points, axis=0, weights=weights)
+            # IMPORTANT: Only use first 3 dimensions (x, y, z) for position tracking
+            # This prevents dimension mismatch errors in covariance matrix operations
+            cluster_points_3d = cluster_points[:, :3]
             
-            # Calculate covariance matrix
-            diff = cluster_points - centroid
+            # Calculate weighted centroid (3D position only)
+            weights = cluster_probs / np.sum(cluster_probs)
+            centroid = np.average(cluster_points_3d, axis=0, weights=weights)
+            
+            # Calculate covariance matrix (3D position only)
+            diff = cluster_points_3d - centroid
             weighted_cov = np.cov(diff.T, aweights=weights)
             
             # Add minimum uncertainty to avoid singular matrices
@@ -410,7 +422,12 @@ class EnhancedHDBSCANTracker:
             if weighted_cov.ndim == 0:
                 weighted_cov = np.eye(3) * min_variance
             elif weighted_cov.ndim == 2:
-                weighted_cov += np.eye(3) * min_variance
+                # Ensure covariance is 3x3
+                if weighted_cov.shape[0] == 3 and weighted_cov.shape[1] == 3:
+                    weighted_cov += np.eye(3) * min_variance
+                else:
+                    # Fallback to identity matrix
+                    weighted_cov = np.eye(3) * min_variance
             else:
                 weighted_cov = np.eye(3) * min_variance
             
