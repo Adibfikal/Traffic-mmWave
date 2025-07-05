@@ -555,38 +555,23 @@ class RadarGUI(QMainWindow):
             if view_box is not None:
                 view_box.setLimits(xMin=-25, xMax=25, yMin=-10, yMax=40)
         
-        # Add crosshairs at graph coordinates (0,0) - these should appear at the center
-        self.v_line_combined = pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen('red', width=3, style=pg.QtCore.Qt.PenStyle.DashLine))
-        self.h_line_combined = pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen('red', width=3, style=pg.QtCore.Qt.PenStyle.DashLine))
-        
-        # Add the crosshairs to the plot
-        self.plot_2d_combined.addItem(self.v_line_combined)
-        self.plot_2d_combined.addItem(self.h_line_combined)
+        # Crosshairs removed - using 4-arrow system instead for better visibility
         
         # Add origin marker at graph coordinates (0,0) with high visibility
-        self.origin_marker_combined = self.plot_2d_combined.plot(
-            x=[0], y=[0],
-            pen=None,  # No line connecting points
-            symbol='+',
-            symbolPen=pg.mkPen('red', width=4),
-            symbolBrush=pg.mkBrush('red'),
-            symbolSize=30
-        )
+        # Use only the approaches that work correctly with graph coordinates
         
-        # Add a backup origin marker using a circle for better visibility
-        self.origin_circle_combined = self.plot_2d_combined.plot(
-            x=[0], y=[0],
-            pen=None,
-            symbol='o',
-            symbolPen=pg.mkPen('red', width=3),
-            symbolBrush=pg.mkBrush(color=(255, 0, 0, 100)),  # Semi-transparent red
-            symbolSize=20
-        )
+        # Multiple arrows pointing to origin for better visibility
+        self.origin_arrow_right = pg.ArrowItem(pos=(0, 0), angle=0, pen=pg.mkPen('red', width=3), brush=pg.mkBrush('red'))
+        self.plot_2d_combined.addItem(self.origin_arrow_right)
         
-        # Add text label for origin
-        self.origin_text = pg.TextItem(text="RADAR", color=(255, 0, 0), anchor=(0.5, 0.5))
-        self.origin_text.setPos(0, -2)  # Position text slightly below origin
-        self.plot_2d_combined.addItem(self.origin_text)
+        self.origin_arrow_left = pg.ArrowItem(pos=(0, 0), angle=180, pen=pg.mkPen('red', width=3), brush=pg.mkBrush('red'))
+        self.plot_2d_combined.addItem(self.origin_arrow_left)
+        
+        self.origin_arrow_up = pg.ArrowItem(pos=(0, 0), angle=90, pen=pg.mkPen('red', width=3), brush=pg.mkBrush('red'))
+        self.plot_2d_combined.addItem(self.origin_arrow_up)
+        
+        self.origin_arrow_down = pg.ArrowItem(pos=(0, 0), angle=270, pen=pg.mkPen('red', width=3), brush=pg.mkBrush('red'))
+        self.plot_2d_combined.addItem(self.origin_arrow_down)
         
         # Create scatter plot for 2D point cloud
         self.point_scatter_2d_combined = pg.ScatterPlotItem(
@@ -627,27 +612,22 @@ class RadarGUI(QMainWindow):
             self.plot_2d_combined.setXRange(-20, 20)
             self.plot_2d_combined.setYRange(-5, 35)
             
-            # Update crosshair positions to ensure they're at (0,0) in graph coordinates
-            if hasattr(self, 'v_line_combined'):
-                self.v_line_combined.setPos(0)
-            if hasattr(self, 'h_line_combined'):
-                self.h_line_combined.setPos(0)
-                
             # Update origin marker position with enhanced visibility
-            if hasattr(self, 'origin_marker_combined'):
-                # Update the plot data for the origin marker
-                self.origin_marker_combined.setData(x=[0], y=[0])
-                
-            # Update backup circle marker
-            if hasattr(self, 'origin_circle_combined'):
-                self.origin_circle_combined.setData(x=[0], y=[0])
-                
-            # Update text label position
-            if hasattr(self, 'origin_text'):
-                self.origin_text.setPos(0, -2)
+            if hasattr(self, 'origin_arrow_right'):
+                # Update the ArrowItem with new data
+                self.origin_arrow_right.setPos(0, 0)
+            if hasattr(self, 'origin_arrow_left'):
+                # Update the ArrowItem with new data
+                self.origin_arrow_left.setPos(0, 0)
+            if hasattr(self, 'origin_arrow_up'):
+                # Update the ArrowItem with new data
+                self.origin_arrow_up.setPos(0, 0)
+            if hasattr(self, 'origin_arrow_down'):
+                # Update the ArrowItem with new data
+                self.origin_arrow_down.setPos(0, 0)
                 
                 # Log for debugging
-                print(f"DEBUG: Origin marker positioned at graph coordinates (0, 0)")
+                print(f"DEBUG: Origin markers positioned at graph coordinates (0, 0)")
                 print(f"DEBUG: Current plot range - X: {self.plot_2d_combined.viewRange()[0]}, Y: {self.plot_2d_combined.viewRange()[1]}")
         
     def toggle_connection(self):
