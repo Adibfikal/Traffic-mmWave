@@ -15,7 +15,8 @@ import os
 
 from radar_interface import RadarInterface
 from data_recorder import DataRecorder
-from tracking import HDBSCANTracker
+from enhanced_hdbscan_tracker import EnhancedHDBSCANTracker
+from enhanced_visualization import EnhancedTrackingVisualization
 
 class WebcamThread(QThread):
     """Thread for webcam capture without blocking the GUI"""
@@ -158,14 +159,16 @@ class RadarGUI(QMainWindow):
         self.webcam_thread = WebcamThread()
         self.data_recorder = DataRecorder()
         
-        # Initialize tracking system
-        self.tracker = HDBSCANTracker(
+        # Initialize enhanced tracking system
+        self.tracker = EnhancedHDBSCANTracker(
             min_cluster_size=3,
             min_samples=2,
             cluster_selection_epsilon=0.5,
-            max_tracking_distance=2.0,
-            min_detection_confidence=0.3
+            max_tracking_distance=2.0
         )
+        
+        # Initialize enhanced visualization (will be set up after GL widget creation)
+        self.enhanced_visualization = None
         self.tracking_enabled = False
         self.tracking_results = None
         
@@ -855,25 +858,23 @@ class RadarGUI(QMainWindow):
     def update_tracking_params(self):
         """Update tracking algorithm parameters"""
         if hasattr(self, 'tracker'):
-            # Update HDBSCAN parameters
-            self.tracker.min_cluster_size = self.min_cluster_size_spin.value()
-            self.tracker.max_tracking_distance = float(self.max_track_distance_spin.value())
+            # Update enhanced tracker parameters using the new API
+            params = {
+                'min_cluster_size': self.min_cluster_size_spin.value(),
+                'max_tracking_distance': float(self.max_track_distance_spin.value())
+            }
             
-            # Update advanced parameters if they exist
+            # Add advanced parameters if they exist
             if hasattr(self, 'min_samples_spin'):
-                self.tracker.min_samples = self.min_samples_spin.value()
+                params['min_samples'] = self.min_samples_spin.value()
             if hasattr(self, 'cluster_epsilon_spin'):
-                self.tracker.cluster_selection_epsilon = self.cluster_epsilon_spin.value() / 10.0
-            if hasattr(self, 'min_confidence_spin'):
-                self.tracker.min_detection_confidence = self.min_confidence_spin.value() / 100.0
+                params['cluster_selection_epsilon'] = self.cluster_epsilon_spin.value() / 10.0
             
-            self.log_status(f"Updated tracking params: min_cluster_size={self.tracker.min_cluster_size}, "
-                          f"max_distance={self.tracker.max_tracking_distance}")
-            print(f"TRACKING: Updated parameters - cluster_size={self.tracker.min_cluster_size}, "
-                  f"max_distance={self.tracker.max_tracking_distance}, "
-                  f"min_samples={getattr(self.tracker, 'min_samples', 'N/A')}, "
-                  f"epsilon={getattr(self.tracker, 'cluster_selection_epsilon', 'N/A')}, "
-                  f"min_confidence={getattr(self.tracker, 'min_detection_confidence', 'N/A')}")
+            self.tracker.update_parameters(**params)
+            
+            self.log_status(f"Updated tracking params: min_cluster_size={params['min_cluster_size']}, "
+                          f"max_distance={params['max_tracking_distance']}")
+            print(f"TRACKING: Updated parameters - {params}")
     
 
     
@@ -1019,14 +1020,14 @@ class RadarGUI(QMainWindow):
                 # Process tracking if enabled
                 if self.tracking_enabled and self.point_cloud_data is not None:
                     try:
-                        self.tracking_results = self.tracker.process_frame(self.point_cloud_data)
+                        self.tracking_results = self.tracker.process_frame(self.point_cloud_data, current_time)
                         
                         # Log tracking info periodically
-                        if self.tracking_results['frame_id'] % 20 == 0:
-                            n_tracks = self.tracking_results['n_active_tracks']
-                            n_detections = self.tracking_results['n_detections']
+                        if self.tracking_results['frame_stats']['frame_count'] % 20 == 0:
+                            n_tracks = self.tracking_results['frame_stats']['active_tracks']
+                            n_detections = len(self.tracking_results['detections'])
                             proc_time = self.tracking_results['processing_time'] * 1000
-                            print(f"TRACKING: Frame {self.tracking_results['frame_id']}: "
+                            print(f"TRACKING: Frame {self.tracking_results['frame_stats']['frame_count']}: "
                                   f"{n_tracks} tracks, {n_detections} detections, {proc_time:.1f}ms")
                                   
                     except Exception as e:
@@ -1037,7 +1038,7 @@ class RadarGUI(QMainWindow):
                 if self.tracking_enabled:
                     # Process empty frame for tracking (predictions only)
                     try:
-                        self.tracking_results = self.tracker.process_frame([])
+                        self.tracking_results = self.tracker.process_frame(np.array([]), current_time)
                     except Exception as e:
                         print(f"TRACKING ERROR (empty frame): {e}")
                         self.tracking_results = None
@@ -1076,8 +1077,8 @@ class RadarGUI(QMainWindow):
             # Update tracking statistics
             if self.tracking_enabled and self.tracking_results:
                 self.tracking_status_label.setText("Tracking: Active")
-                n_tracks = self.tracking_results.get('n_active_tracks', 0)
-                n_detections = self.tracking_results.get('n_detections', 0)
+                n_tracks = self.tracking_results.get('frame_stats', {}).get('active_tracks', 0)
+                n_detections = len(self.tracking_results.get('detections', []))
                 self.tracks_label.setText(f"Tracks: {n_tracks} | Detections: {n_detections}")
             else:
                 self.tracking_status_label.setText("Tracking: Disabled" if not self.tracking_enabled else "Tracking: No Data")
@@ -1218,31 +1219,37 @@ class RadarGUI(QMainWindow):
                 if hasattr(self, 'point_scatter_3d_combined'):
                     self.point_scatter_3d_combined.setData(pos=np.array([[0, 0, 0]]))
         
-        # Update tracking visualization if tracking is enabled
+        # Update enhanced tracking visualization if tracking is enabled
         if self.tracking_enabled and self.tracking_results and 'tracks' in self.tracking_results:
             tracks = self.tracking_results['tracks']
             if tracks:
-                # Extract track positions
+                # Extract track positions and motion states
                 track_positions = np.array([track['position'] for track in tracks])
                 
-                # Create colors for different tracks (cycle through colors)
-                color_palette = np.array([
-                    [1, 0, 0, 1],    # Red
-                    [0, 1, 0, 1],    # Green  
-                    [0, 0, 1, 1],    # Blue
-                    [1, 1, 0, 1],    # Yellow
-                    [1, 0, 1, 1],    # Magenta
-                    [0, 1, 1, 1],    # Cyan
-                ])
+                # Create colors based on motion state (as requested by user)
+                motion_state_colors = {
+                    'stationary': [1, 0, 0, 1],         # Red for stationary
+                    'constant_velocity': [0, 1, 0, 1],  # Green for constant velocity
+                    'maneuvering': [0, 0, 1, 1]         # Blue for maneuvering
+                }
                 
-                # Create color array - one color per track
-                track_colors = np.array([color_palette[i % len(color_palette)] for i in range(len(tracks))])
+                # Create color array based on motion states
+                track_colors = []
+                for track in tracks:
+                    motion_state = track.get('motion_state', 'constant_velocity')
+                    color = motion_state_colors.get(motion_state, [1, 1, 1, 1])  # Default white
+                    track_colors.append(color)
                 
-                # Update tracking scatter plots
+                track_colors = np.array(track_colors)
+                
+                # Use larger size for better visibility (as requested by user)
+                track_size = 0.5
+                
+                # Update tracking scatter plots with enhanced visualization
                 if hasattr(self, 'track_scatter'):
-                    self.track_scatter.setData(pos=track_positions, color=track_colors, size=0.3)
+                    self.track_scatter.setData(pos=track_positions, color=track_colors, size=track_size)
                 if hasattr(self, 'track_scatter_3d_combined'):
-                    self.track_scatter_3d_combined.setData(pos=track_positions, color=track_colors, size=0.3)
+                    self.track_scatter_3d_combined.setData(pos=track_positions, color=track_colors, size=track_size)
             else:
                 # Clear tracking displays when no tracks
                 if hasattr(self, 'track_scatter'):
@@ -1254,7 +1261,7 @@ class RadarGUI(QMainWindow):
             if hasattr(self, 'track_scatter'):
                 self.track_scatter.setData(pos=np.array([[0, 0, 0]]), color=np.array([[1, 0, 0, 0]]), size=0.1)
             if hasattr(self, 'track_scatter_3d_combined'):
-                self.track_scatter_3d_combined.setData(pos=np.array([[0, 0, 0]]), color=np.array([[1, 0, 0, 0]]), size=0.1)
+                self.track_scatter.setData(pos=np.array([[0, 0, 0]]), color=np.array([[1, 0, 0, 0]]), size=0.1)
         
         self.last_visualization_update = current_time
         
