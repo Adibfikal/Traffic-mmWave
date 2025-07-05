@@ -6,6 +6,8 @@ import numpy as np
 from datetime import datetime
 from typing import Optional, Dict, List, Any, Union
 import shutil
+import threading
+from queue import Queue
 
 
 class DataRecorder:
@@ -31,6 +33,11 @@ class DataRecorder:
         self.video_fps = 30
         self.video_codec = cv2.VideoWriter.fourcc(*'mp4v')  # type: ignore
         self.video_frame_size = None
+        
+        # Async video recording
+        self.video_queue = Queue()
+        self.video_thread = None
+        self.video_thread_running = False
         
         # Playback state
         self.is_playing = False
@@ -102,6 +109,12 @@ class DataRecorder:
         
         self.is_recording = False
         duration = time.time() - self.start_time if self.start_time else 0
+        
+        # Stop async video recording thread
+        if self.video_thread_running:
+            self.video_thread_running = False
+            if self.video_thread and self.video_thread.is_alive():
+                self.video_thread.join(timeout=5.0)  # Wait up to 5 seconds
         
         # Close video writer if open
         if self.video_writer is not None:
@@ -203,6 +216,74 @@ class DataRecorder:
                     frame_bgr = cv2.resize(frame_bgr, self.video_frame_size)
                 
                 self.video_writer.write(frame_bgr)
+    
+    def add_camera_frame_async(self, camera_frame: np.ndarray):
+        """Add camera frame to recording queue for async processing"""
+        if not self.is_recording or self.recording_mode not in ["camera", "both"]:
+            return
+        
+        if self.session_folder is None:
+            return
+        
+        # Start video recording thread if not already running
+        if not self.video_thread_running:
+            self._start_video_thread()
+        
+        # Add frame to queue (non-blocking)
+        try:
+            self.video_queue.put(camera_frame, block=False)
+        except:
+            # Queue is full, skip this frame to avoid blocking
+            pass
+    
+    def _start_video_thread(self):
+        """Start the video recording thread"""
+        if self.video_thread_running:
+            return
+        
+        self.video_thread_running = True
+        self.video_thread = threading.Thread(target=self._video_recording_worker, daemon=True)
+        self.video_thread.start()
+    
+    def _video_recording_worker(self):
+        """Worker thread for async video recording"""
+        while self.video_thread_running or not self.video_queue.empty():
+            try:
+                # Get frame from queue with timeout
+                frame = self.video_queue.get(timeout=1.0)
+                
+                # Initialize video writer on first frame
+                if self.video_writer is None:
+                    height, width = frame.shape[:2]
+                    self.video_frame_size = (width, height)
+                    
+                    video_path = os.path.join(self.session_folder, "camera_video.mp4")
+                    self.video_writer = cv2.VideoWriter(
+                        video_path, 
+                        self.video_codec, 
+                        self.video_fps, 
+                        self.video_frame_size
+                    )
+                
+                # Write frame to video
+                if self.video_writer and self.video_writer.isOpened():
+                    # Ensure frame is in correct format
+                    if len(frame.shape) == 3 and frame.shape[2] == 3:
+                        frame_bgr = frame.astype(np.uint8)
+                        
+                        # Resize if necessary
+                        if frame_bgr.shape[:2][::-1] != self.video_frame_size:
+                            frame_bgr = cv2.resize(frame_bgr, self.video_frame_size)
+                        
+                        self.video_writer.write(frame_bgr)
+                
+                self.video_queue.task_done()
+                
+            except:
+                # Timeout or queue empty
+                continue
+        
+        self.video_thread_running = False
     
     def _format_point_cloud(self, point_cloud: Any) -> List[List[float]]:
         """Format point cloud data to match replay format"""

@@ -15,6 +15,7 @@ import os
 
 from radar_interface import RadarInterface
 from data_recorder import DataRecorder
+from tracking import HDBSCANTracker
 
 class WebcamThread(QThread):
     """Thread for webcam capture without blocking the GUI"""
@@ -157,6 +158,17 @@ class RadarGUI(QMainWindow):
         self.webcam_thread = WebcamThread()
         self.data_recorder = DataRecorder()
         
+        # Initialize tracking system
+        self.tracker = HDBSCANTracker(
+            min_cluster_size=3,
+            min_samples=2,
+            cluster_selection_epsilon=0.5,
+            max_tracking_distance=2.0,
+            min_detection_confidence=0.3
+        )
+        self.tracking_enabled = False
+        self.tracking_results = None
+        
         # Data storage
         self.point_cloud_data = None
         self.current_frame = None
@@ -165,7 +177,6 @@ class RadarGUI(QMainWindow):
         self.last_visualization_update = 0
         self.visualization_update_interval = 50  # Start with 50ms (20 FPS)
         self.last_point_count = 0
-        self.skip_range_enforcement = False
         
         # FPS tracking
         self.frame_times = deque(maxlen=20)  # Track last 20 frame times
@@ -173,6 +184,10 @@ class RadarGUI(QMainWindow):
         self.radar_fps = 0  # Track actual radar data reception rate
         self.viz_fps = 0    # Track visualization update rate
         
+        self.dist = 70
+        self.elev = 90
+        self.azim = 270
+
         # Setup UI
         self.setup_ui()
         
@@ -319,8 +334,28 @@ class RadarGUI(QMainWindow):
         main_layout.addWidget(viz_panel, 3)
         
     def create_control_panel(self):
-        """Create the control panel with port selection and controls"""
+        """Create the control panel with tabs for main controls and object tracking"""
         panel = QGroupBox("Controls")
+        main_layout = QVBoxLayout()
+        
+        # Create tab widget for control panel
+        self.control_tab_widget = QTabWidget()
+        
+        # Main Controls Tab
+        main_controls_tab = self.create_main_controls_tab()
+        self.control_tab_widget.addTab(main_controls_tab, "Main Controls")
+        
+        # Object Tracking Tab
+        tracking_tab = self.create_tracking_tab()
+        self.control_tab_widget.addTab(tracking_tab, "Object Tracking")
+        
+        main_layout.addWidget(self.control_tab_widget)
+        panel.setLayout(main_layout)
+        return panel
+    
+    def create_main_controls_tab(self):
+        """Create the main controls tab with port, webcam, recording, and status"""
+        main_tab = QWidget()
         layout = QVBoxLayout()
         
         # Port configuration
@@ -433,8 +468,6 @@ class RadarGUI(QMainWindow):
         self.debug_checkbox.toggled.connect(self.toggle_debug_mode)
         button_layout.addWidget(self.debug_checkbox)
         
-
-        
         layout.addLayout(button_layout)
         
         # Status display
@@ -454,6 +487,8 @@ class RadarGUI(QMainWindow):
         self.recording_status_label = QLabel("Recording: Stopped")
         self.playback_status_label = QLabel("Playback: No file loaded")
         self.performance_status_label = QLabel("Performance: Normal")
+        self.tracking_status_label = QLabel("Tracking: Disabled")
+        self.tracks_label = QLabel("Tracks: 0")
         
         stats_layout.addWidget(self.points_label)
         stats_layout.addWidget(self.fps_label)
@@ -461,13 +496,106 @@ class RadarGUI(QMainWindow):
         stats_layout.addWidget(self.recording_status_label)
         stats_layout.addWidget(self.playback_status_label)
         stats_layout.addWidget(self.performance_status_label)
+        stats_layout.addWidget(self.tracking_status_label)
+        stats_layout.addWidget(self.tracks_label)
         
         stats_group.setLayout(stats_layout)
         layout.addWidget(stats_group)
         
         layout.addStretch()
-        panel.setLayout(layout)
-        return panel
+        main_tab.setLayout(layout)
+        return main_tab
+    
+    def create_tracking_tab(self):
+        """Create the object tracking tab with tracking controls and parameters"""
+        tracking_tab = QWidget()
+        layout = QVBoxLayout()
+        
+        # Tracking controls
+        tracking_group = QGroupBox("Object Tracking Controls")
+        tracking_layout = QGridLayout()
+        
+        self.tracking_btn = QPushButton("Enable Tracking")
+        self.tracking_btn.setCheckable(True)
+        self.tracking_btn.toggled.connect(self.toggle_tracking)
+        tracking_layout.addWidget(self.tracking_btn, 0, 0, 1, 2)
+        
+        # Tracking parameters
+        tracking_layout.addWidget(QLabel("Min Cluster Size:"), 1, 0)
+        self.min_cluster_size_spin = QSpinBox()
+        self.min_cluster_size_spin.setMinimum(2)
+        self.min_cluster_size_spin.setMaximum(20)
+        self.min_cluster_size_spin.setValue(3)
+        self.min_cluster_size_spin.valueChanged.connect(self.update_tracking_params)
+        tracking_layout.addWidget(self.min_cluster_size_spin, 1, 1)
+        
+        tracking_layout.addWidget(QLabel("Max Track Distance:"), 2, 0)
+        self.max_track_distance_spin = QSpinBox()
+        self.max_track_distance_spin.setMinimum(1)
+        self.max_track_distance_spin.setMaximum(10)
+        self.max_track_distance_spin.setValue(2)
+        self.max_track_distance_spin.valueChanged.connect(self.update_tracking_params)
+        tracking_layout.addWidget(self.max_track_distance_spin, 2, 1)
+        
+        tracking_group.setLayout(tracking_layout)
+        layout.addWidget(tracking_group)
+        
+        # Advanced tracking parameters
+        advanced_group = QGroupBox("Advanced Parameters")
+        advanced_layout = QGridLayout()
+        
+        advanced_layout.addWidget(QLabel("Min Samples:"), 0, 0)
+        self.min_samples_spin = QSpinBox()
+        self.min_samples_spin.setMinimum(1)
+        self.min_samples_spin.setMaximum(20)
+        self.min_samples_spin.setValue(2)
+        self.min_samples_spin.valueChanged.connect(self.update_tracking_params)
+        advanced_layout.addWidget(self.min_samples_spin, 0, 1)
+        
+        advanced_layout.addWidget(QLabel("Cluster Epsilon:"), 1, 0)
+        self.cluster_epsilon_spin = QSpinBox()
+        self.cluster_epsilon_spin.setMinimum(1)
+        self.cluster_epsilon_spin.setMaximum(50)
+        self.cluster_epsilon_spin.setValue(5)  # Represents 0.5 (value/10)
+        self.cluster_epsilon_spin.setSuffix(" (×0.1)")
+        self.cluster_epsilon_spin.valueChanged.connect(self.update_tracking_params)
+        advanced_layout.addWidget(self.cluster_epsilon_spin, 1, 1)
+        
+        advanced_layout.addWidget(QLabel("Min Confidence:"), 2, 0)
+        self.min_confidence_spin = QSpinBox()
+        self.min_confidence_spin.setMinimum(1)
+        self.min_confidence_spin.setMaximum(100)
+        self.min_confidence_spin.setValue(30)  # Represents 0.3 (value/100)
+        self.min_confidence_spin.setSuffix(" (%)")
+        self.min_confidence_spin.valueChanged.connect(self.update_tracking_params)
+        advanced_layout.addWidget(self.min_confidence_spin, 2, 1)
+        
+        advanced_group.setLayout(advanced_layout)
+        layout.addWidget(advanced_group)
+        
+        # Tracking information
+        info_group = QGroupBox("Tracking Information")
+        info_layout = QVBoxLayout()
+        
+        info_text = QLabel(
+            "HDBSCAN + Particle Filter Tracking:\n\n"
+            "• Min Cluster Size: Minimum points to form a cluster\n"
+            "• Max Track Distance: Maximum distance for data association\n"
+            "• Min Samples: Minimum samples for HDBSCAN core points\n"
+            "• Cluster Epsilon: Distance threshold for cluster selection\n"
+            "• Min Confidence: Minimum confidence for valid detections\n\n"
+            "Tracked objects appear as colored markers in the 3D visualization."
+        )
+        info_text.setWordWrap(True)
+        info_text.setStyleSheet("QLabel { color: gray; font-size: 10px; }")
+        info_layout.addWidget(info_text)
+        
+        info_group.setLayout(info_layout)
+        layout.addWidget(info_group)
+        
+        layout.addStretch()
+        tracking_tab.setLayout(layout)
+        return tracking_tab
         
     def create_visualization_panel(self):
         """Create the visualization panel with tabs for radar and combined view"""
@@ -515,6 +643,14 @@ class RadarGUI(QMainWindow):
         )
         self.plot_widget.addItem(self.point_scatter)
         
+        # Create scatter plot for tracked objects (centroids)
+        self.track_scatter = gl.GLScatterPlotItem(
+            pos=np.array([[0, 0, 0]]),
+            color=(1, 0, 0, 1.0),  # Red for tracked objects
+            size=0.3
+        )
+        self.plot_widget.addItem(self.track_scatter)
+        
         # Add 3D view directly to layout (no splitter)
         layout.addWidget(self.plot_widget)
         radar_widget.setLayout(layout)
@@ -523,66 +659,18 @@ class RadarGUI(QMainWindow):
 
     
     def create_combined_tab(self):
-        """Create the combined view tab with 2D radar visualization and webcam feed"""
+        """Create the combined view tab with 3D radar visualization and webcam feed"""
         combined_widget = QWidget()
         layout = QHBoxLayout()
         
-        # Left side - 2D Radar Visualization with origin at 0,0
+        # Left side - 3D Radar Visualization  
         radar_side = QWidget()
         radar_layout = QVBoxLayout()
-        radar_layout.addWidget(QLabel("2D Radar View (Bird's Eye)"))
+        radar_layout.addWidget(QLabel("3D Radar View (Bird's Eye)"))
         
-        # Create 2D plot for combined view with origin at 0,0
-        self.plot_2d_combined = pg.PlotWidget()
-        self.plot_2d_combined.setLabel('left', 'Y Distance (Forward)', units='m')
-        self.plot_2d_combined.setLabel('bottom', 'X Distance (Left/Right)', units='m')
-        self.plot_2d_combined.setTitle("Bird's Eye View - Origin at Radar")
-        self.plot_2d_combined.setAspectLocked(True)
-        self.plot_2d_combined.showGrid(x=True, y=True)
-        
-        # Set coordinate system with origin at center (0,0)
-        self.plot_2d_combined.enableAutoRange(False)
-        self.plot_2d_combined.setMouseEnabled(x=True, y=True)  # Allow manual zoom/pan
-        
-        # Set range with origin properly positioned
-        self.plot_2d_combined.setXRange(-20, 20)
-        self.plot_2d_combined.setYRange(-5, 35)
-        
-        # Ensure the plot view is properly established before adding items
-        plot_item = self.plot_2d_combined.getPlotItem()
-        if plot_item is not None:
-            view_box = plot_item.getViewBox()
-            if view_box is not None:
-                view_box.setLimits(xMin=-25, xMax=25, yMin=-10, yMax=40)
-        
-        # Crosshairs removed - using 4-arrow system instead for better visibility
-        
-        # Add origin marker at graph coordinates (0,0) with high visibility
-        # Use only the approaches that work correctly with graph coordinates
-        
-        # Multiple arrows pointing to origin for better visibility
-        self.origin_arrow_right = pg.ArrowItem(pos=(0, 0), angle=0, pen=pg.mkPen('red', width=3), brush=pg.mkBrush('red'))
-        self.plot_2d_combined.addItem(self.origin_arrow_right)
-        
-        self.origin_arrow_left = pg.ArrowItem(pos=(0, 0), angle=180, pen=pg.mkPen('red', width=3), brush=pg.mkBrush('red'))
-        self.plot_2d_combined.addItem(self.origin_arrow_left)
-        
-        self.origin_arrow_up = pg.ArrowItem(pos=(0, 0), angle=90, pen=pg.mkPen('red', width=3), brush=pg.mkBrush('red'))
-        self.plot_2d_combined.addItem(self.origin_arrow_up)
-        
-        self.origin_arrow_down = pg.ArrowItem(pos=(0, 0), angle=270, pen=pg.mkPen('red', width=3), brush=pg.mkBrush('red'))
-        self.plot_2d_combined.addItem(self.origin_arrow_down)
-        
-        # Create scatter plot for 2D point cloud
-        self.point_scatter_2d_combined = pg.ScatterPlotItem(
-            [], [], 
-            pen=None, 
-            brush=(0, 255, 255, 200),  # Cyan color for better visibility
-            size=10  # Larger points for better visibility
-        )
-        self.plot_2d_combined.addItem(self.point_scatter_2d_combined)
-        
-        radar_layout.addWidget(self.plot_2d_combined)
+        # Create 3D plot for combined view
+        self.setup_3d_radar_plot_combined()
+        radar_layout.addWidget(self.plot_3d_combined)
         radar_side.setLayout(radar_layout)
         
         # Right side - Webcam Feed
@@ -592,44 +680,68 @@ class RadarGUI(QMainWindow):
         
         self.webcam_label_combined = QLabel("Webcam feed will appear here")
         self.webcam_label_combined.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.webcam_label_combined.setMinimumSize(480, 360)
+        self.webcam_label_combined.setMinimumSize(400, 300)
         self.webcam_label_combined.setStyleSheet("border: 2px solid gray; background-color: black; color: white; font-size: 14px;")
         
         webcam_layout.addWidget(self.webcam_label_combined)
         webcam_side.setLayout(webcam_layout)
         
-        # Add both sides to main layout (60% radar, 40% webcam)
-        layout.addWidget(radar_side, 3)  # Radar takes 3/5 of space
-        layout.addWidget(webcam_side, 2)  # Webcam takes 2/5 of space
+        # Add both sides to main layout (65% radar, 35% webcam)
+        layout.addWidget(radar_side, 65)  # Radar takes 65% of space
+        layout.addWidget(webcam_side, 35)  # Webcam takes 35% of space
         
         combined_widget.setLayout(layout)
         return combined_widget
+    
+    def setup_3d_radar_plot_combined(self):
+        """Setup a 3D radar plot for combined view with bird's eye perspective"""
+        # Create the 3D plot widget
+        self.plot_3d_combined = gl.GLViewWidget()
+        
+        # Set the camera position for bird's eye view (z=0 plane, azimuth rotated 90 degrees counter clockwise)
+        # Position camera above the scene looking down, with y=0 at bottom
+        
+        self.plot_3d_combined.setCameraPosition(
+            distance=self.dist,
+            elevation=self.elev,  # Look straight down (90 degrees from horizontal)
+            azimuth=self.azim,    # 90 degrees counter clockwise rotation around z-axis
+           
+        )
+        
+        # Add grid (keeping existing style)
+        grid = gl.GLGridItem()
+        grid.scale(5, 5, 1)
+        self.plot_3d_combined.addItem(grid)
+        
+        # Add axes (keeping existing style)
+        axis = gl.GLAxisItem()
+        self.plot_3d_combined.addItem(axis)
+        
+        # Create scatter plot for point cloud (keeping existing style)
+        self.point_scatter_3d_combined = gl.GLScatterPlotItem(
+            pos=np.array([[0, 0, 0]]),
+            color=(1, 1, 1, 0.5),
+            size=0.1
+        )
+        self.plot_3d_combined.addItem(self.point_scatter_3d_combined)
+        
+        # Create scatter plot for tracked objects in combined view
+        self.track_scatter_3d_combined = gl.GLScatterPlotItem(
+            pos=np.array([[0, 0, 0]]),
+            color=(1, 0, 0, 1.0),  # Red for tracked objects
+            size=0.3
+        )
+        self.plot_3d_combined.addItem(self.track_scatter_3d_combined)
         
     def refresh_origin_markers(self):
-        """Ensure origin markers are properly positioned at graph coordinates (0,0)"""
-        if hasattr(self, 'plot_2d_combined'):
-            # Force the plot to update its coordinate system
-            self.plot_2d_combined.setXRange(-20, 20)
-            self.plot_2d_combined.setYRange(-5, 35)
-            
-            # Update origin marker position with enhanced visibility
-            if hasattr(self, 'origin_arrow_right'):
-                # Update the ArrowItem with new data
-                self.origin_arrow_right.setPos(0, 0)
-            if hasattr(self, 'origin_arrow_left'):
-                # Update the ArrowItem with new data
-                self.origin_arrow_left.setPos(0, 0)
-            if hasattr(self, 'origin_arrow_up'):
-                # Update the ArrowItem with new data
-                self.origin_arrow_up.setPos(0, 0)
-            if hasattr(self, 'origin_arrow_down'):
-                # Update the ArrowItem with new data
-                self.origin_arrow_down.setPos(0, 0)
-                
-                # Log for debugging
-                print(f"DEBUG: Origin markers positioned at graph coordinates (0, 0)")
-                print(f"DEBUG: Current plot range - X: {self.plot_2d_combined.viewRange()[0]}, Y: {self.plot_2d_combined.viewRange()[1]}")
-        
+        """Refresh 3D plot view settings (keeping bird's eye perspective)"""
+        if hasattr(self, 'plot_3d_combined'):
+            # Ensure the camera maintains the bird's eye view
+            self.plot_3d_combined.setCameraPosition(
+                distance=self.dist,
+                elevation=self.elev,  # Look straight down (90 degrees from horizontal)
+                azimuth=self.azim     # 90 degrees counter clockwise rotation around z-axis
+            )
     def toggle_connection(self):
         """Connect or disconnect from the radar"""
         if self.connect_btn.text() == "Connect":
@@ -725,6 +837,44 @@ class RadarGUI(QMainWindow):
             self.log_status("Debug mode disabled")
             print("\n=== Point Cloud Debug Mode Disabled ===\n")
     
+    def toggle_tracking(self, checked):
+        """Toggle object tracking on/off"""
+        self.tracking_enabled = checked
+        if checked:
+            self.tracking_btn.setText("Disable Tracking")
+            self.log_status("Object tracking enabled - HDBSCAN clustering + Particle Filter")
+            print("\n=== Object Tracking Enabled ===")
+            print("Using HDBSCAN clustering with Particle Filter tracking")
+        else:
+            self.tracking_btn.setText("Enable Tracking")
+            self.log_status("Object tracking disabled")
+            print("\n=== Object Tracking Disabled ===")
+            # Clear tracking results
+            self.tracking_results = None
+            
+    def update_tracking_params(self):
+        """Update tracking algorithm parameters"""
+        if hasattr(self, 'tracker'):
+            # Update HDBSCAN parameters
+            self.tracker.min_cluster_size = self.min_cluster_size_spin.value()
+            self.tracker.max_tracking_distance = float(self.max_track_distance_spin.value())
+            
+            # Update advanced parameters if they exist
+            if hasattr(self, 'min_samples_spin'):
+                self.tracker.min_samples = self.min_samples_spin.value()
+            if hasattr(self, 'cluster_epsilon_spin'):
+                self.tracker.cluster_selection_epsilon = self.cluster_epsilon_spin.value() / 10.0
+            if hasattr(self, 'min_confidence_spin'):
+                self.tracker.min_detection_confidence = self.min_confidence_spin.value() / 100.0
+            
+            self.log_status(f"Updated tracking params: min_cluster_size={self.tracker.min_cluster_size}, "
+                          f"max_distance={self.tracker.max_tracking_distance}")
+            print(f"TRACKING: Updated parameters - cluster_size={self.tracker.min_cluster_size}, "
+                  f"max_distance={self.tracker.max_tracking_distance}, "
+                  f"min_samples={getattr(self.tracker, 'min_samples', 'N/A')}, "
+                  f"epsilon={getattr(self.tracker, 'cluster_selection_epsilon', 'N/A')}, "
+                  f"min_confidence={getattr(self.tracker, 'min_detection_confidence', 'N/A')}")
+    
 
     
     def toggle_webcam(self):
@@ -756,12 +906,15 @@ class RadarGUI(QMainWindow):
         """Update webcam display with new frame"""
         self.current_frame = frame
         
-        # Record camera frame if recording is active
+        # Record camera frame if recording is active (non-blocking)
         if self.data_recorder.is_recording:
             # The frame from webcam is already in RGB format, but OpenCV expects BGR
             # So we need to convert RGB to BGR for proper recording
-            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            self.data_recorder.add_camera_frame(frame_bgr)
+            # Use a copy to avoid blocking the UI thread
+            frame_copy = frame.copy()
+            frame_bgr = cv2.cvtColor(frame_copy, cv2.COLOR_RGB2BGR)
+            # Use threaded recording to avoid blocking UI
+            self.data_recorder.add_camera_frame_async(frame_bgr)
         
         # Only update displays if playback is NOT active to avoid conflicts
         if not self.data_recorder.is_playing:
@@ -862,8 +1015,32 @@ class RadarGUI(QMainWindow):
             # Ensure point cloud data is a numpy array for consistent handling
             if data['pointCloud'] is not None and len(data['pointCloud']) > 0:
                 self.point_cloud_data = np.array(data['pointCloud'])
+                
+                # Process tracking if enabled
+                if self.tracking_enabled and self.point_cloud_data is not None:
+                    try:
+                        self.tracking_results = self.tracker.process_frame(self.point_cloud_data)
+                        
+                        # Log tracking info periodically
+                        if self.tracking_results['frame_id'] % 20 == 0:
+                            n_tracks = self.tracking_results['n_active_tracks']
+                            n_detections = self.tracking_results['n_detections']
+                            proc_time = self.tracking_results['processing_time'] * 1000
+                            print(f"TRACKING: Frame {self.tracking_results['frame_id']}: "
+                                  f"{n_tracks} tracks, {n_detections} detections, {proc_time:.1f}ms")
+                                  
+                    except Exception as e:
+                        print(f"TRACKING ERROR: {e}")
+                        self.tracking_results = None
             else:
                 self.point_cloud_data = None
+                if self.tracking_enabled:
+                    # Process empty frame for tracking (predictions only)
+                    try:
+                        self.tracking_results = self.tracker.process_frame([])
+                    except Exception as e:
+                        print(f"TRACKING ERROR (empty frame): {e}")
+                        self.tracking_results = None
             
             # Debug mode: print point cloud data to terminal
             if self.debug_checkbox.isChecked() and self.point_cloud_data is not None and len(self.point_cloud_data) > 0:
@@ -895,6 +1072,16 @@ class RadarGUI(QMainWindow):
             # Update statistics (including FPS)
             num_points = len(self.point_cloud_data) if self.point_cloud_data is not None else 0
             self.points_label.setText(f"Points: {num_points}")
+            
+            # Update tracking statistics
+            if self.tracking_enabled and self.tracking_results:
+                self.tracking_status_label.setText("Tracking: Active")
+                n_tracks = self.tracking_results.get('n_active_tracks', 0)
+                n_detections = self.tracking_results.get('n_detections', 0)
+                self.tracks_label.setText(f"Tracks: {n_tracks} | Detections: {n_detections}")
+            else:
+                self.tracking_status_label.setText("Tracking: Disabled" if not self.tracking_enabled else "Tracking: No Data")
+                self.tracks_label.setText("Tracks: 0")
             
             # Calculate and update FPS (less frequently for performance)
             if current_time - self.last_fps_update > 1.0:  # Update FPS every second
@@ -1019,74 +1206,68 @@ class RadarGUI(QMainWindow):
             # Update 3D visualization
             self.point_scatter.setData(pos=points_3d)
             
-            # Update 2D point cloud (X-Y projection) for combined view only
-            if len(points_3d.shape) >= 2 and points_3d.shape[1] >= 2:
-                x_points = points_3d[:, 0]
-                y_points = points_3d[:, 1]
-                
-                # Update combined view 2D plot
-                if hasattr(self, 'point_scatter_2d_combined'):
-                    self.point_scatter_2d_combined.setData(x_points, y_points)
-                
-                # Only enforce ranges occasionally to reduce CPU load for combined view
-                if not self.skip_range_enforcement and hasattr(self, 'plot_2d_combined'):
-                    self.plot_2d_combined.setXRange(-20, 20)
-                    self.plot_2d_combined.setYRange(-5, 35)
-                    
-                    # Skip range enforcement for a few frames if we have large point clouds
-                    if current_point_count > 150:
-                        self.skip_range_enforcement = True
-                        # Re-enable after some frames
-                        QTimer.singleShot(1000, lambda: setattr(self, 'skip_range_enforcement', False))
+            # Update 3D point cloud for combined view  
+            if hasattr(self, 'point_scatter_3d_combined'):
+                self.point_scatter_3d_combined.setData(pos=points_3d)
         else:
             # No point cloud data, clear displays (but only occasionally for performance)
             if current_time - self.last_visualization_update > 500:  # Only clear every 500ms
                 self.point_scatter.setData(pos=np.array([[0, 0, 0]]))
                 
-                # Clear combined view
-                if hasattr(self, 'point_scatter_2d_combined'):
-                    self.point_scatter_2d_combined.setData([], [])
-                    
-                # Maintain ranges for combined view
-                if not self.skip_range_enforcement and hasattr(self, 'plot_2d_combined'):
-                    self.plot_2d_combined.setXRange(-20, 20)
-                    self.plot_2d_combined.setYRange(-5, 35)
+                # Clear 3D scatter plot for combined view
+                if hasattr(self, 'point_scatter_3d_combined'):
+                    self.point_scatter_3d_combined.setData(pos=np.array([[0, 0, 0]]))
+        
+        # Update tracking visualization if tracking is enabled
+        if self.tracking_enabled and self.tracking_results and 'tracks' in self.tracking_results:
+            tracks = self.tracking_results['tracks']
+            if tracks:
+                # Extract track positions
+                track_positions = np.array([track['position'] for track in tracks])
+                
+                # Create colors for different tracks (cycle through colors)
+                color_palette = np.array([
+                    [1, 0, 0, 1],    # Red
+                    [0, 1, 0, 1],    # Green  
+                    [0, 0, 1, 1],    # Blue
+                    [1, 1, 0, 1],    # Yellow
+                    [1, 0, 1, 1],    # Magenta
+                    [0, 1, 1, 1],    # Cyan
+                ])
+                
+                # Create color array - one color per track
+                track_colors = np.array([color_palette[i % len(color_palette)] for i in range(len(tracks))])
+                
+                # Update tracking scatter plots
+                if hasattr(self, 'track_scatter'):
+                    self.track_scatter.setData(pos=track_positions, color=track_colors, size=0.3)
+                if hasattr(self, 'track_scatter_3d_combined'):
+                    self.track_scatter_3d_combined.setData(pos=track_positions, color=track_colors, size=0.3)
+            else:
+                # Clear tracking displays when no tracks
+                if hasattr(self, 'track_scatter'):
+                    self.track_scatter.setData(pos=np.array([[0, 0, 0]]), color=np.array([[1, 0, 0, 0]]), size=0.1)
+                if hasattr(self, 'track_scatter_3d_combined'):
+                    self.track_scatter_3d_combined.setData(pos=np.array([[0, 0, 0]]), color=np.array([[1, 0, 0, 0]]), size=0.1)
+        else:
+            # Clear tracking displays when tracking disabled
+            if hasattr(self, 'track_scatter'):
+                self.track_scatter.setData(pos=np.array([[0, 0, 0]]), color=np.array([[1, 0, 0, 0]]), size=0.1)
+            if hasattr(self, 'track_scatter_3d_combined'):
+                self.track_scatter_3d_combined.setData(pos=np.array([[0, 0, 0]]), color=np.array([[1, 0, 0, 0]]), size=0.1)
         
         self.last_visualization_update = current_time
         
     def enforce_2d_ranges(self):
-        """Enforce the correct range for combined 2D plot to prevent auto-scaling (optimized for performance)"""
-        # Skip enforcement if we're in skip mode or have large point clouds
-        if self.skip_range_enforcement:
-            return
-            
+        """Enforce the correct camera view for combined 3D plot (optimized for performance)"""
         try:
-            # Target ranges for combined view (origin at center)
-            target_x = [-20, 20]
-            target_y = [-5, 35]
-            tolerance = 1.0  # Allow some drift before correcting
-            
-            # Combined 2D plot - only correct if significantly off
-            if hasattr(self, 'plot_2d_combined'):
-                current_x_range = self.plot_2d_combined.viewRange()[0]
-                current_y_range = self.plot_2d_combined.viewRange()[1]
-                
-                x_drift = (abs(current_x_range[0] - target_x[0]) > tolerance or 
-                          abs(current_x_range[1] - target_x[1]) > tolerance)
-                y_drift = (abs(current_y_range[0] - target_y[0]) > tolerance or 
-                          abs(current_y_range[1] - target_y[1]) > tolerance)
-                
-                if x_drift or y_drift:
-                    if x_drift:
-                        self.plot_2d_combined.setXRange(target_x[0], target_x[1])
-                    if y_drift:
-                        self.plot_2d_combined.setYRange(target_y[0], target_y[1])
-                    
-                    # Refresh origin markers after range correction
-                    self.refresh_origin_markers()
+            # Ensure the 3D combined view maintains bird's eye perspective
+            if hasattr(self, 'plot_3d_combined'):
+                # Refresh the camera position to maintain bird's eye view
+                self.refresh_origin_markers()
                     
         except Exception:
-            # Ignore any errors during range enforcement to prevent crashes
+            # Ignore any errors during view enforcement to prevent crashes
             pass
 
     def handle_error(self, error_msg):

@@ -19,3 +19,10 @@ recordings/session_20250704_162850/session_info.json
 recordings/session_20250704_164704/session_info.json
 recordings/session_20250704_165411/session_info.json
 recordings/test/session_info.json
+recordings/recording_20250705_070018/camera_video.mp4
+recordings/recording_20250705_070018/radar_data.json
+recordings/recording_20250705_070018/session_info.json
+recordings/recording_20250705_070411/camera_video.mp4
+recordings/recording_20250705_070411/radar_data.json
+recordings/recording_20250705_070411/session_info.json
+__pycache__/radar_gui.cpython-313.pyc
