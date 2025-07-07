@@ -65,3 +65,10 @@ tracking/__pycache__/__init__.cpython-313.pyc
 tracking/__pycache__/adaptive_clustering.cpython-313.pyc
 tracking/__pycache__/data_association.cpython-313.pyc
 tracking/__pycache__/enhanced_tracker.cpython-313.pyc
+gtrack_test_results.png
+.gitignore
+__pycache__/gtrack_algorithm.cpython-313.pyc
+__pycache__/gtrack_no_snr.cpython-313.pyc
+__pycache__/gtrack_tracker.cpython-313.pyc
+__pycache__/recording_analyzer.cpython-313.pyc
+clustering_debug.png

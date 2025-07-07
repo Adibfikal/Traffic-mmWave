@@ -16,9 +16,11 @@ import os
 # Import refactored modules
 from threads import WebcamThread, RadarDataThread
 from visualization import BoundingBoxManager, TrailManager, VisualizationCoordinator
-from tracking import EnhancedHDBSCANTracker
+# Tracking disabled - using basic point cloud visualization only
 from data_recorder import DataRecorder
 from radar_interface import RadarInterface
+from gtrack_algorithm import GTRACKProcessor
+from gtrack_no_snr import GTRACKNoSNR
 
 
 class RadarGUI(QMainWindow):
@@ -31,6 +33,15 @@ class RadarGUI(QMainWindow):
         self.radar_thread = RadarDataThread()
         self.webcam_thread = WebcamThread()
         self.data_recorder = DataRecorder()
+        
+        # GTRACK processor (No-SNR version for X,Y only data)
+        self.gtrack_processor = GTRACKNoSNR(max_tracks=12)  # Realistic vehicle count
+        self.gtrack_enabled = False
+        self.gtrack_results = None
+        
+        # Track visualization data
+        self.track_history = {}  # Store track position history for trails
+        self.track_trail_length = 20  # Number of points in trail
         
         # Data storage
         self.point_cloud_data = None
@@ -197,19 +208,27 @@ class RadarGUI(QMainWindow):
         main_layout.addWidget(viz_panel, 3)
         
     def create_control_panel(self):
-        """Create the control panel with main controls"""
-        panel = QGroupBox("Controls")
+        """Create the control panel with tabs for controls and status/statistics"""
+        panel = QGroupBox("Control Panel")
         main_layout = QVBoxLayout()
         
-        # Create main controls directly (no tabs needed)
-        main_controls = self.create_main_controls_tab()
-        main_layout.addWidget(main_controls)
+        # Create tab widget for control panel
+        self.control_tab_widget = QTabWidget()
         
+        # Create controls tab
+        controls_tab = self.create_controls_tab()
+        self.control_tab_widget.addTab(controls_tab, "Controls")
+        
+        # Create status & statistics tab
+        status_tab = self.create_status_statistics_tab()
+        self.control_tab_widget.addTab(status_tab, "Status & Statistics")
+        
+        main_layout.addWidget(self.control_tab_widget)
         panel.setLayout(main_layout)
         return panel
     
-    def create_main_controls_tab(self):
-        """Create the main controls tab with port, webcam, recording, and status"""
+    def create_controls_tab(self):
+        """Create the controls tab with main controls"""
         main_tab = QWidget()
         layout = QVBoxLayout()
         
@@ -300,6 +319,42 @@ class RadarGUI(QMainWindow):
         recording_group.setLayout(recording_layout)
         layout.addWidget(recording_group)
         
+        # GTRACK tracking configuration
+        tracking_group = QGroupBox("GTRACK Vehicle Tracking")
+        tracking_layout = QGridLayout()
+        
+        # Enable/disable tracking
+        self.gtrack_enable_checkbox = QCheckBox("Enable GTRACK Tracking")
+        self.gtrack_enable_checkbox.toggled.connect(self.toggle_gtrack)
+        tracking_layout.addWidget(self.gtrack_enable_checkbox, 0, 0, 1, 2)
+        
+        # Max tracks setting
+        tracking_layout.addWidget(QLabel("Max Vehicles:"), 1, 0)
+        self.max_tracks_spinbox = QSpinBox()
+        self.max_tracks_spinbox.setMinimum(1)
+        self.max_tracks_spinbox.setMaximum(50)
+        self.max_tracks_spinbox.setValue(25)
+        self.max_tracks_spinbox.valueChanged.connect(self.on_max_tracks_changed)
+        tracking_layout.addWidget(self.max_tracks_spinbox, 1, 1)
+        
+        # Clustering sensitivity
+        tracking_layout.addWidget(QLabel("Clustering:"), 2, 0)
+        self.clustering_sensitivity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.clustering_sensitivity_slider.setMinimum(1)
+        self.clustering_sensitivity_slider.setMaximum(10)
+        self.clustering_sensitivity_slider.setValue(5)
+        self.clustering_sensitivity_slider.valueChanged.connect(self.on_clustering_changed)
+        tracking_layout.addWidget(self.clustering_sensitivity_slider, 2, 1)
+        
+        # Reset tracking button
+        self.reset_tracking_btn = QPushButton("Reset All Tracks")
+        self.reset_tracking_btn.clicked.connect(self.reset_gtrack)
+        self.reset_tracking_btn.setEnabled(False)
+        tracking_layout.addWidget(self.reset_tracking_btn, 3, 0, 1, 2)
+        
+        tracking_group.setLayout(tracking_layout)
+        layout.addWidget(tracking_group)
+        
         # Control buttons
         button_layout = QVBoxLayout()
         
@@ -325,12 +380,24 @@ class RadarGUI(QMainWindow):
         
         layout.addLayout(button_layout)
         
+        main_tab.setLayout(layout)
+        return main_tab
+        
+    def create_status_statistics_tab(self):
+        """Create the status and statistics tab"""
+        status_tab = QWidget()
+        layout = QVBoxLayout()
+        
         # Status display
+        status_group = QGroupBox("Status")
+        status_layout = QVBoxLayout()
+        
         self.status_text = QTextEdit()
         self.status_text.setReadOnly(True)
         self.status_text.setMaximumHeight(200)
-        layout.addWidget(QLabel("Status:"))
-        layout.addWidget(self.status_text)
+        status_layout.addWidget(self.status_text)
+        status_group.setLayout(status_layout)
+        layout.addWidget(status_group)
         
         # Statistics
         stats_group = QGroupBox("Statistics")
@@ -358,9 +425,9 @@ class RadarGUI(QMainWindow):
         layout.addWidget(stats_group)
         
         layout.addStretch()
-        main_tab.setLayout(layout)
-        return main_tab
-        
+        status_tab.setLayout(layout)
+        return status_tab
+    
     def create_visualization_panel(self):
         """Create the visualization panel with tabs for radar and combined view"""
         panel = QGroupBox("Visualization")
@@ -414,6 +481,12 @@ class RadarGUI(QMainWindow):
             size=0.3
         )
         self.plot_widget.addItem(self.track_scatter)
+        
+        # Create track trails (line plots for track history)
+        self.track_trails = {}  # Dictionary to store trail line plots for each track
+        
+        # Create bounding boxes for tracks
+        self.track_boxes = {}  # Dictionary to store bounding box line plots for each track
         
         # Add 3D view directly to layout (no splitter)
         layout.addWidget(self.plot_widget)
@@ -496,6 +569,12 @@ class RadarGUI(QMainWindow):
             size=0.3
         )
         self.plot_3d_combined.addItem(self.track_scatter_3d_combined)
+        
+        # Create track trails for combined view
+        self.track_trails_combined = {}  # Dictionary to store trail line plots for each track
+        
+        # Create bounding boxes for combined view
+        self.track_boxes_combined = {}  # Dictionary to store bounding box line plots for each track
         
     def refresh_origin_markers(self):
         """Refresh 3D plot view settings (keeping bird's eye perspective)"""
@@ -681,6 +760,265 @@ class RadarGUI(QMainWindow):
         """Handle webcam errors"""
         self.log_status(f"Webcam error: {error_msg}")
         self.webcam_status_label.setText("Webcam: Error")
+    
+    # GTRACK methods
+    def toggle_gtrack(self, enabled):
+        """Toggle GTRACK tracking on/off"""
+        self.gtrack_enabled = enabled
+        self.reset_tracking_btn.setEnabled(enabled)
+        
+        if enabled:
+            self.tracking_status_label.setText("Tracking: GTRACK Enabled")
+            self.log_status("GTRACK vehicle tracking enabled")
+        else:
+            self.tracking_status_label.setText("Tracking: Disabled")
+            self.tracks_label.setText("Tracks: 0")
+            self.gtrack_results = None
+            self.log_status("GTRACK tracking disabled")
+    
+    def on_max_tracks_changed(self, value):
+        """Handle changes to maximum tracks setting"""
+        self.gtrack_processor = GTRACKProcessor(max_tracks=value)
+        self.log_status(f"Maximum tracks set to: {value}")
+    
+    def on_clustering_changed(self, value):
+        """Handle changes to clustering sensitivity"""
+        # Adjust clustering parameters based on slider value (1-10)
+        sensitivity = value / 5.0  # Convert to 0.2-2.0 range
+        
+        # Update clustering parameters for no-SNR version
+        base_eps_map = {'near_range': 1.2, 'mid_range': 1.8, 'far_range': 2.5}
+        for range_level in self.gtrack_processor.clustering_params:
+            if range_level in base_eps_map:
+                base_eps = base_eps_map[range_level]
+                self.gtrack_processor.clustering_params[range_level]['eps'] = base_eps * sensitivity
+        
+        self.log_status(f"Clustering sensitivity: {value}/10")
+    
+    def reset_gtrack(self):
+        """Reset all GTRACK tracks"""
+        self.gtrack_processor = GTRACKNoSNR(max_tracks=min(self.max_tracks_spinbox.value(), 12))
+        self.gtrack_results = None
+        
+        # Clear visualization data
+        self.track_history = {}
+        self._clear_track_visualization()
+        
+        self.tracks_label.setText("Tracks: 0")
+        self.log_status("All GTRACK tracks reset")
+    
+    def _update_track_visualization(self, tracks):
+        """Update track visualization with centroids, bounding boxes, and trails"""
+        print(f"DEBUG: [VIZ] _update_track_visualization called with {len(tracks)} tracks")
+        
+        # Extract track positions for centroids
+        track_positions = []
+        current_track_ids = set()
+        
+        for track in tracks:
+            track_id = track['id']
+            x, y = track['position']
+            state = track['state']
+            conf = track['confidence']
+            track_positions.append([x, y, 0])  # Add z=0 for 3D visualization
+            current_track_ids.add(track_id)
+            
+            print(f"DEBUG: [VIZ] Track {track_id}: pos=({x:.2f},{y:.2f}), state={state}, conf={conf:.2f}")
+            
+            # Update track history for trails
+            if track_id not in self.track_history:
+                self.track_history[track_id] = []
+            
+            self.track_history[track_id].append([x, y, 0])
+            
+            # Limit trail length
+            if len(self.track_history[track_id]) > self.track_trail_length:
+                self.track_history[track_id] = self.track_history[track_id][-self.track_trail_length:]
+        
+        print(f"DEBUG: [VIZ] Processed {len(tracks)} tracks, sample positions: {track_positions[:3]}")
+        
+        # Update centroids
+        if track_positions:
+            track_positions = np.array(track_positions)
+            print(f"DEBUG: [VIZ] Setting track_scatter data with {len(track_positions)} positions")
+            print(f"DEBUG: [VIZ] Position array shape: {track_positions.shape}")
+            print(f"DEBUG: [VIZ] Position range X: {np.min(track_positions[:,0]):.2f} to {np.max(track_positions[:,0]):.2f}")
+            print(f"DEBUG: [VIZ] Position range Y: {np.min(track_positions[:,1]):.2f} to {np.max(track_positions[:,1]):.2f}")
+            
+            # Update scatter plots with more visible settings
+            self.track_scatter.setData(pos=track_positions, color=(1, 0, 0, 1.0), size=1.0)  # Larger size
+            if hasattr(self, 'track_scatter_3d_combined'):
+                self.track_scatter_3d_combined.setData(pos=track_positions, color=(1, 0, 0, 1.0), size=1.0)
+                print(f"DEBUG: [VIZ] Updated combined view track centroids")
+            
+            print(f"DEBUG: [VIZ] Successfully updated {len(track_positions)} track centroids")
+        else:
+            print(f"DEBUG: [VIZ] No track positions to display")
+        
+        # Update trails
+        print(f"DEBUG: [VIZ] Updating trails for {len(current_track_ids)} tracks")
+        self._update_track_trails(current_track_ids)
+        
+        # Update bounding boxes
+        print(f"DEBUG: [VIZ] Updating bounding boxes for {len(tracks)} tracks")
+        self._update_track_bounding_boxes(tracks)
+        
+        # Clean up old tracks
+        self._cleanup_old_tracks(current_track_ids)
+    
+    def _update_track_trails(self, current_track_ids):
+        """Update track trails (movement history)"""
+        for track_id in current_track_ids:
+            if track_id in self.track_history and len(self.track_history[track_id]) > 1:
+                trail_points = np.array(self.track_history[track_id])
+                
+                # Create or update trail line plot for main view
+                if track_id not in self.track_trails:
+                    trail_line = gl.GLLinePlotItem(
+                        pos=trail_points,
+                        color=(0, 1, 0, 0.8),  # Green trails
+                        width=2.0,
+                        antialias=True
+                    )
+                    self.plot_widget.addItem(trail_line)
+                    self.track_trails[track_id] = trail_line
+                    print(f"DEBUG: [VIZ] Created trail for track {track_id}")
+                else:
+                    self.track_trails[track_id].setData(pos=trail_points)
+                
+                # Create or update trail line plot for combined view
+                if hasattr(self, 'plot_3d_combined'):
+                    if track_id not in self.track_trails_combined:
+                        trail_line_combined = gl.GLLinePlotItem(
+                            pos=trail_points,
+                            color=(0, 1, 0, 0.8),  # Green trails
+                            width=2.0,
+                            antialias=True
+                        )
+                        self.plot_3d_combined.addItem(trail_line_combined)
+                        self.track_trails_combined[track_id] = trail_line_combined
+                    else:
+                        self.track_trails_combined[track_id].setData(pos=trail_points)
+    
+    def _update_track_bounding_boxes(self, tracks):
+        """Update bounding boxes around tracks"""
+        for track in tracks:
+            track_id = track['id']
+            x, y = track['position']
+            vx, vy = track['velocity']
+            
+            # Calculate bounding box based on velocity and uncertainty
+            # Larger box for faster moving objects
+            speed = np.sqrt(vx**2 + vy**2)
+            box_size = max(2.0, min(8.0, speed * 0.5 + 2.0))  # 2-8 meter box
+            
+            # Create box vertices
+            box_vertices = np.array([
+                [x - box_size/2, y - box_size/2, 0],
+                [x + box_size/2, y - box_size/2, 0],
+                [x + box_size/2, y + box_size/2, 0],
+                [x - box_size/2, y + box_size/2, 0],
+                [x - box_size/2, y - box_size/2, 0]  # Close the box
+            ])
+            
+            # Create or update bounding box for main view
+            if track_id not in self.track_boxes:
+                box_line = gl.GLLinePlotItem(
+                    pos=box_vertices,
+                    color=(1, 1, 0, 0.8),  # Yellow bounding boxes
+                    width=2.0,
+                    antialias=True
+                )
+                self.plot_widget.addItem(box_line)
+                self.track_boxes[track_id] = box_line
+                print(f"DEBUG: [VIZ] Created bounding box for track {track_id}")
+            else:
+                self.track_boxes[track_id].setData(pos=box_vertices)
+            
+            # Create or update bounding box for combined view
+            if hasattr(self, 'plot_3d_combined'):
+                if track_id not in self.track_boxes_combined:
+                    box_line_combined = gl.GLLinePlotItem(
+                        pos=box_vertices,
+                        color=(1, 1, 0, 0.8),  # Yellow bounding boxes
+                        width=2.0,
+                        antialias=True
+                    )
+                    self.plot_3d_combined.addItem(box_line_combined)
+                    self.track_boxes_combined[track_id] = box_line_combined
+                else:
+                    self.track_boxes_combined[track_id].setData(pos=box_vertices)
+    
+    def _cleanup_old_tracks(self, current_track_ids):
+        """Remove visualization elements for tracks that no longer exist"""
+        # Clean up trails
+        old_trail_ids = set(self.track_trails.keys()) - current_track_ids
+        for track_id in old_trail_ids:
+            self.plot_widget.removeItem(self.track_trails[track_id])
+            del self.track_trails[track_id]
+            print(f"DEBUG: [VIZ] Removed trail for old track {track_id}")
+            
+        old_trail_combined_ids = set(self.track_trails_combined.keys()) - current_track_ids
+        for track_id in old_trail_combined_ids:
+            if hasattr(self, 'plot_3d_combined'):
+                self.plot_3d_combined.removeItem(self.track_trails_combined[track_id])
+            del self.track_trails_combined[track_id]
+        
+        # Clean up bounding boxes
+        old_box_ids = set(self.track_boxes.keys()) - current_track_ids
+        for track_id in old_box_ids:
+            self.plot_widget.removeItem(self.track_boxes[track_id])
+            del self.track_boxes[track_id]
+            print(f"DEBUG: [VIZ] Removed bounding box for old track {track_id}")
+            
+        old_box_combined_ids = set(self.track_boxes_combined.keys()) - current_track_ids
+        for track_id in old_box_combined_ids:
+            if hasattr(self, 'plot_3d_combined'):
+                self.plot_3d_combined.removeItem(self.track_boxes_combined[track_id])
+            del self.track_boxes_combined[track_id]
+        
+        # Clean up history
+        old_history_ids = set(self.track_history.keys()) - current_track_ids
+        for track_id in old_history_ids:
+            del self.track_history[track_id]
+    
+    def _clear_track_visualization(self):
+        """Clear all track visualization elements"""
+        # Only clear if there are actually items to clear (avoid spam)
+        items_to_clear = (len(self.track_trails) + len(self.track_boxes) + 
+                         len(self.track_trails_combined) + len(self.track_boxes_combined) +
+                         len(self.track_history))
+        
+        if items_to_clear > 0:
+            print("DEBUG: [VIZ] Clearing all track visualization")
+        
+        # Clear centroids
+        self.track_scatter.setData(pos=np.array([[0, 0, 0]]), color=(1, 0, 0, 0.0), size=0.1)
+        if hasattr(self, 'track_scatter_3d_combined'):
+            self.track_scatter_3d_combined.setData(pos=np.array([[0, 0, 0]]), color=(1, 0, 0, 0.0), size=0.1)
+        
+        # Clear all trails
+        for trail_line in self.track_trails.values():
+            self.plot_widget.removeItem(trail_line)
+        self.track_trails.clear()
+        
+        for trail_line in self.track_trails_combined.values():
+            if hasattr(self, 'plot_3d_combined'):
+                self.plot_3d_combined.removeItem(trail_line)
+        self.track_trails_combined.clear()
+        
+        # Clear all bounding boxes
+        for box_line in self.track_boxes.values():
+            self.plot_widget.removeItem(box_line)
+        self.track_boxes.clear()
+        
+        for box_line in self.track_boxes_combined.values():
+            if hasattr(self, 'plot_3d_combined'):
+                self.plot_3d_combined.removeItem(box_line)
+        self.track_boxes_combined.clear()
+        
+        # Clear history
+        self.track_history.clear()
                 
     @Slot(dict)
     def update_data(self, data):
@@ -740,31 +1078,67 @@ class RadarGUI(QMainWindow):
             if data['pointCloud'] is not None and len(data['pointCloud']) > 0:
                 self.point_cloud_data = np.array(data['pointCloud'])
                 
-                # Process tracking if enabled (Tracking not available in simplified GUI)
-                # if self.tracking_enabled and self.point_cloud_data is not None:
-                #     try:
-                #         self.tracking_results = self.tracker.process_frame(self.point_cloud_data, current_time)
-                #         
-                #         # Log tracking info periodically
-                #         if self.tracking_results['frame_stats']['frame_count'] % 20 == 0:
-                #             n_tracks = self.tracking_results['frame_stats']['active_tracks']
-                #             n_detections = len(self.tracking_results['detections'])
-                #             proc_time = self.tracking_results['processing_time'] * 1000
-                #             print(f"TRACKING: Frame {self.tracking_results['frame_stats']['frame_count']}: "
-                #                   f"{n_tracks} tracks, {n_detections} detections, {proc_time:.1f}ms")
-                #                   
-                #     except Exception as e:
-                #         print(f"TRACKING ERROR: {e}")
-                #         self.tracking_results = None
+                # Process GTRACK tracking if enabled
+                if self.gtrack_enabled and self.point_cloud_data is not None:
+                    try:
+                        # DEBUG: Log input data
+                        frame_num = data.get('header', {}).get('frameNumber', 0)
+                        print(f"DEBUG: [GTRACK INPUT] Frame {frame_num} - Processing {len(data['pointCloud'])} points")
+                        
+                        # Format data for GTRACK processing
+                        frame_data = {
+                            'timestamp': current_time * 1000,  # GTRACK expects milliseconds
+                            'frameData': {
+                                'error': 0,
+                                'frameNum': frame_num,
+                                'pointCloud': data['pointCloud']
+                            }
+                        }
+                        
+                        self.gtrack_results = self.gtrack_processor.process_frame(frame_data)
+                        
+                        # DEBUG: Always log GTRACK results to see what's happening
+                        n_tracks = self.gtrack_results['frame_stats']['active_tracks']
+                        n_detections = self.gtrack_results['frame_stats']['valid_detections']
+                        total_detections = self.gtrack_results['frame_stats']['total_detections']
+                        proc_time = self.gtrack_results['processing_time'] * 1000
+                        
+                        print(f"DEBUG: [GTRACK OUTPUT] Frame {frame_num}: "
+                              f"{total_detections} raw -> {n_detections} valid -> {n_tracks} tracks, {proc_time:.1f}ms")
+                        
+                        # DEBUG: Log individual tracks
+                        if self.gtrack_results.get('tracks'):
+                            for track in self.gtrack_results['tracks']:
+                                pos = track['position']
+                                vel = track['velocity']
+                                conf = track['confidence']
+                                print(f"DEBUG: [TRACK] ID:{track['id']} pos:({pos[0]:.2f},{pos[1]:.2f}) "
+                                      f"vel:({vel[0]:.2f},{vel[1]:.2f}) conf:{conf:.2f}")
+                        else:
+                            print("DEBUG: [GTRACK] No tracks detected")
+                                  
+                    except Exception as e:
+                        print(f"DEBUG: [GTRACK ERROR] {e}")
+                        import traceback
+                        traceback.print_exc()
+                        self.gtrack_results = None
             else:
                 self.point_cloud_data = None
-                # if self.tracking_enabled:
-                #     # Process empty frame for tracking (predictions only)
-                #     try:
-                #         self.tracking_results = self.tracker.process_frame(np.array([]), current_time)
-                #     except Exception as e:
-                #         print(f"TRACKING ERROR (empty frame): {e}")
-                #         self.tracking_results = None
+                if self.gtrack_enabled:
+                    # Process empty frame for GTRACK (predictions only)
+                    try:
+                        frame_data = {
+                            'timestamp': current_time * 1000,
+                            'frameData': {
+                                'error': 0,
+                                'frameNum': data.get('header', {}).get('frameNumber', 0),
+                                'pointCloud': []
+                            }
+                        }
+                        self.gtrack_results = self.gtrack_processor.process_frame(frame_data)
+                    except Exception as e:
+                        print(f"GTRACK ERROR (empty frame): {e}")
+                        self.gtrack_results = None
             
             # Debug mode: print point cloud data to terminal
             if self.debug_checkbox.isChecked() and self.point_cloud_data is not None and len(self.point_cloud_data) > 0:
@@ -797,17 +1171,20 @@ class RadarGUI(QMainWindow):
             num_points = len(self.point_cloud_data) if self.point_cloud_data is not None else 0
             self.points_label.setText(f"Points: {num_points}")
             
-            # Update tracking statistics (Tracking not available in simplified GUI)
-            # if self.tracking_enabled and self.tracking_results:
-            #     self.tracking_status_label.setText("Tracking: Active")
-            #     n_tracks = self.tracking_results.get('frame_stats', {}).get('active_tracks', 0)
-            #     n_detections = len(self.tracking_results.get('detections', []))
-            #     self.tracks_label.setText(f"Tracks: {n_tracks} | Detections: {n_detections}")
-            # else:
-            #     self.tracking_status_label.setText("Tracking: Disabled" if not self.tracking_enabled else "Tracking: No Data")
-            #     self.tracks_label.setText("Tracks: 0")
-            self.tracking_status_label.setText("Tracking: Not Available (Use PyQt6 version)")
+                    # Update GTRACK tracking statistics
+        if self.gtrack_enabled and self.gtrack_results:
+            self.tracking_status_label.setText("Tracking: GTRACK Active")
+            n_tracks = self.gtrack_results.get('frame_stats', {}).get('active_tracks', 0)
+            n_detections = self.gtrack_results.get('frame_stats', {}).get('valid_detections', 0)
+            visible_tracks = self.gtrack_results.get('frame_stats', {}).get('visible_tracks', 0)
+            total_result_tracks = len(self.gtrack_results.get('tracks', []))
+            self.tracks_label.setText(f"Tracks: {n_tracks} active, {visible_tracks} visible, {total_result_tracks} in results | Detections: {n_detections}")
+            
+            print(f"DEBUG: [MAIN] GTRACK results received - Active:{n_tracks}, Visible:{visible_tracks}, Result tracks:{total_result_tracks}")
+        else:
+            self.tracking_status_label.setText("Tracking: Disabled" if not self.gtrack_enabled else "Tracking: No Data")
             self.tracks_label.setText("Tracks: 0")
+            print(f"DEBUG: [MAIN] No GTRACK results - Enabled:{self.gtrack_enabled}, Results:{self.gtrack_results is not None}")
             
             # Calculate and update FPS (less frequently for performance)
             if current_time - self.last_fps_update > 1.0:  # Update FPS every second
@@ -873,7 +1250,7 @@ class RadarGUI(QMainWindow):
         """
         current_time = time.time() * 1000  # milliseconds
         
-        # Handle playback if active
+                # Handle playback if active
         if self.data_recorder.is_playing:
             playback_frame = self.data_recorder.get_next_playback_frame()
             if playback_frame:
@@ -882,7 +1259,38 @@ class RadarGUI(QMainWindow):
                     frame_data = playback_frame["frameData"]
                     if frame_data.get("pointCloud"):
                         self.point_cloud_data = np.array(frame_data["pointCloud"])
-                    
+                        
+                        # *** CRITICAL FIX: Process GTRACK during playback ***
+                        if self.gtrack_enabled and self.point_cloud_data is not None and len(self.point_cloud_data) > 0:
+                            try:
+                                print(f"DEBUG: [PLAYBACK GTRACK] Processing {len(self.point_cloud_data)} points from playback")
+                                
+                                # Format data for GTRACK processing (same as live data)
+                                gtrack_frame_data = {
+                                    'timestamp': current_time,  # Use current time for playback
+                                    'frameData': {
+                                        'error': 0,
+                                        'frameNum': frame_data.get('frameNum', 0),
+                                        'pointCloud': frame_data["pointCloud"]
+                                    }
+                                }
+                                
+                                self.gtrack_results = self.gtrack_processor.process_frame(gtrack_frame_data)
+                                
+                                # DEBUG: Log playback GTRACK results
+                                n_tracks = self.gtrack_results['frame_stats']['active_tracks']
+                                n_detections = self.gtrack_results['frame_stats']['valid_detections']
+                                visible_tracks = self.gtrack_results['frame_stats'].get('visible_tracks', 0)
+                                tracks_in_result = len(self.gtrack_results.get('tracks', []))
+                                
+                                print(f"DEBUG: [PLAYBACK GTRACK] Active:{n_tracks}, Visible:{visible_tracks}, Results:{tracks_in_result}, Detections:{n_detections}")
+                                
+                            except Exception as e:
+                                print(f"DEBUG: [PLAYBACK GTRACK ERROR] {e}")
+                                import traceback
+                                traceback.print_exc()
+                                self.gtrack_results = None
+                
                 # Handle camera data from playback - UPDATE DISPLAYS DIRECTLY
                 if "cameraFrame" in playback_frame and "decoded_image" in playback_frame["cameraFrame"]:
                     camera_frame = playback_frame["cameraFrame"]["decoded_image"]
@@ -935,6 +1343,23 @@ class RadarGUI(QMainWindow):
             # Update 3D point cloud for combined view  
             if hasattr(self, 'point_scatter_3d_combined'):
                 self.point_scatter_3d_combined.setData(pos=points_3d)
+            
+            # Update GTRACK tracks visualization with bounding boxes and trails
+            if self.gtrack_enabled and self.gtrack_results and self.gtrack_results.get('tracks'):
+                print(f"DEBUG: [VIZ] Updating visualization for {len(self.gtrack_results['tracks'])} tracks")
+                self._update_track_visualization(self.gtrack_results['tracks'])
+            else:
+                # DEBUG: Detailed diagnosis of why tracks aren't showing
+                if not self.gtrack_enabled:
+                    print("DEBUG: [VIZ] GTRACK disabled - clearing visualization")
+                elif not self.gtrack_results:
+                    print("DEBUG: [VIZ] No GTRACK results - clearing visualization")
+                elif not self.gtrack_results.get('tracks'):
+                    stats = self.gtrack_results.get('frame_stats', {})
+                    print(f"DEBUG: [VIZ] GTRACK results but no tracks - active:{stats.get('active_tracks', 0)}, detections:{stats.get('valid_detections', 0)} - clearing visualization")
+                else:
+                    print("DEBUG: [VIZ] Unknown condition - clearing track visualization")
+                self._clear_track_visualization()
         else:
             # No point cloud data, clear displays (but only occasionally for performance)
             if current_time - self.last_visualization_update > 500:  # Only clear every 500ms
