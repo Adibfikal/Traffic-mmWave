@@ -13,282 +13,15 @@ import time
 import cv2
 import os
 
-from radar_interface import RadarInterface
+# Import refactored modules
+from threads import WebcamThread, RadarDataThread
+from visualization import BoundingBoxManager, TrailManager, VisualizationCoordinator
+from tracking import EnhancedHDBSCANTracker
 from data_recorder import DataRecorder
-from enhanced_hdbscan_tracker import EnhancedHDBSCANTracker
+from radar_interface import RadarInterface
 from enhanced_visualization import EnhancedTrackingVisualization
 
-class BoundingBoxManager:
-    """Manages 3D bounding boxes for tracked objects"""
-    
-    def __init__(self, gl_view_widget):
-        self.gl_view = gl_view_widget
-        self.bounding_boxes = {}  # track_id -> GLLinePlotItem
-        self.box_colors = [
-            [1, 0, 0, 0.8],  # Red
-            [0, 1, 0, 0.8],  # Green  
-            [0, 0, 1, 0.8],  # Blue
-            [1, 1, 0, 0.8],  # Yellow
-            [1, 0, 1, 0.8],  # Magenta
-            [0, 1, 1, 0.8],  # Cyan
-            [1, 0.5, 0, 0.8],  # Orange
-            [0.5, 0, 1, 0.8],  # Purple
-        ]
-        
-    def create_box_wireframe(self, center, size):
-        """Create wireframe points for a 3D bounding box"""
-        x, y, z = center
-        sx, sy, sz = size
-        
-        # Define the 8 corners of the box
-        corners = np.array([
-            [x-sx/2, y-sy/2, z-sz/2],  # 0: bottom-front-left
-            [x+sx/2, y-sy/2, z-sz/2],  # 1: bottom-front-right  
-            [x+sx/2, y+sy/2, z-sz/2],  # 2: bottom-back-right
-            [x-sx/2, y+sy/2, z-sz/2],  # 3: bottom-back-left
-            [x-sx/2, y-sy/2, z+sz/2],  # 4: top-front-left
-            [x+sx/2, y-sy/2, z+sz/2],  # 5: top-front-right
-            [x+sx/2, y+sy/2, z+sz/2],  # 6: top-back-right
-            [x-sx/2, y+sy/2, z+sz/2],  # 7: top-back-left
-        ])
-        
-        # Define the 12 edges of the box
-        edges = [
-            # Bottom face
-            [0, 1], [1, 2], [2, 3], [3, 0],
-            # Top face  
-            [4, 5], [5, 6], [6, 7], [7, 4],
-            # Vertical edges
-            [0, 4], [1, 5], [2, 6], [3, 7]
-        ]
-        
-        # Create line segments for wireframe
-        lines = []
-        for edge in edges:
-            lines.extend([corners[edge[0]], corners[edge[1]], [np.nan, np.nan, np.nan]])
-        
-        return np.array(lines[:-1])  # Remove last NaN
-        
-    def update_bounding_box(self, track_id, center, size):
-        """Update or create bounding box for a tracked object"""
-        wireframe = self.create_box_wireframe(center, size)
-        color = self.box_colors[track_id % len(self.box_colors)]
-        
-        if track_id in self.bounding_boxes:
-            # Update existing box
-            self.bounding_boxes[track_id].setData(pos=wireframe, color=color, width=2)
-        else:
-            # Create new box
-            box_item = gl.GLLinePlotItem(pos=wireframe, color=color, width=2, antialias=True)
-            self.bounding_boxes[track_id] = box_item
-            self.gl_view.addItem(box_item)
-            
-    def remove_bounding_box(self, track_id):
-        """Remove bounding box for a track"""
-        if track_id in self.bounding_boxes:
-            self.gl_view.removeItem(self.bounding_boxes[track_id])
-            del self.bounding_boxes[track_id]
-            
-    def clear_all_boxes(self):
-        """Clear all bounding boxes"""
-        for track_id in list(self.bounding_boxes.keys()):
-            self.remove_bounding_box(track_id)
 
-class TrailManager:
-    """Manages tracking trails/history for objects"""
-    
-    def __init__(self, gl_view_widget, max_trail_length=50):
-        self.gl_view = gl_view_widget
-        self.max_trail_length = max_trail_length
-        self.trails = {}  # track_id -> deque of positions
-        self.trail_items = {}  # track_id -> GLLinePlotItem
-        self.trail_colors = [
-            [1, 0, 0],  # Red
-            [0, 1, 0],  # Green
-            [0, 0, 1],  # Blue  
-            [1, 1, 0],  # Yellow
-            [1, 0, 1],  # Magenta
-            [0, 1, 1],  # Cyan
-            [1, 0.5, 0],  # Orange
-            [0.5, 0, 1],  # Purple
-        ]
-        
-    def add_position(self, track_id, position):
-        """Add a new position to the trail"""
-        if track_id not in self.trails:
-            self.trails[track_id] = deque(maxlen=self.max_trail_length)
-            
-        self.trails[track_id].append(position.copy())
-        self._update_trail_visualization(track_id)
-        
-    def _update_trail_visualization(self, track_id):
-        """Update the visual trail for a track"""
-        if track_id not in self.trails or len(self.trails[track_id]) < 2:
-            return
-            
-        positions = np.array(list(self.trails[track_id]))
-        base_color = self.trail_colors[track_id % len(self.trail_colors)]
-        
-        # Create fading effect by varying alpha along the trail
-        trail_length = len(positions)
-        colors = []
-        for i in range(trail_length):
-            alpha = (i + 1) / trail_length  # Fade from 0 to 1
-            color = base_color + [alpha]
-            colors.append(color)
-        colors = np.array(colors)
-        
-        if track_id in self.trail_items:
-            # Update existing trail
-            self.trail_items[track_id].setData(pos=positions, color=colors, width=3)
-        else:
-            # Create new trail
-            trail_item = gl.GLLinePlotItem(pos=positions, color=colors, width=3, antialias=True)
-            self.trail_items[track_id] = trail_item
-            self.gl_view.addItem(trail_item)
-            
-    def remove_trail(self, track_id):
-        """Remove trail for a track"""
-        if track_id in self.trails:
-            del self.trails[track_id]
-        if track_id in self.trail_items:
-            self.gl_view.removeItem(self.trail_items[track_id])
-            del self.trail_items[track_id]
-            
-    def clear_all_trails(self):
-        """Clear all trails"""
-        for track_id in list(self.trails.keys()):
-            self.remove_trail(track_id)
-
-class WebcamThread(QThread):
-    """Thread for webcam capture without blocking the GUI"""
-    frame_ready = pyqtSignal(np.ndarray)
-    error_occurred = pyqtSignal(str)
-    
-    def __init__(self):
-        super().__init__()
-        self.camera = None
-        self.is_running = False
-        self.camera_index = 0
-        
-    def setup_camera(self, camera_index=0):
-        """Initialize camera with specified index"""
-        try:
-            self.camera_index = camera_index
-            
-            # Try different backends for external cameras (Windows)
-            backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
-            
-            for backend in backends:
-                try:
-                    self.camera = cv2.VideoCapture(camera_index, backend)
-                    
-                    if not self.camera.isOpened():
-                        if self.camera:
-                            self.camera.release()
-                        continue
-                        
-                    # Set camera properties for better performance
-                    self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                    self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                    self.camera.set(cv2.CAP_PROP_FPS, 30)
-                    self.camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer lag
-                    
-                    # Test if we can actually read frames
-                    ret, frame = self.camera.read()
-                    if ret and frame is not None:
-                        backend_name = {
-                            cv2.CAP_DSHOW: "DirectShow",
-                            cv2.CAP_MSMF: "Microsoft Media Foundation", 
-                            cv2.CAP_ANY: "Default"
-                        }.get(backend, f"Backend {backend}")
-                        
-                        self.error_occurred.emit(f"Camera {camera_index} connected using {backend_name}")
-                        return True
-                    else:
-                        # Can't read frames, try next backend
-                        self.camera.release()
-                        continue
-                        
-                except Exception as e:
-                    if self.camera:
-                        self.camera.release()
-                    continue
-            
-            # If we get here, all backends failed
-            raise Exception(f"Cannot access camera {camera_index} with any backend. Camera may be in use by another application.")
-                
-        except Exception as e:
-            self.error_occurred.emit(f"Failed to setup camera: {str(e)}")
-            return False
-    
-    def run(self):
-        """Main thread loop for capturing frames"""
-        self.is_running = True
-        while self.is_running:
-            try:
-                if self.camera and self.camera.isOpened():
-                    ret, frame = self.camera.read()
-                    if ret:
-                        # Convert BGR to RGB for Qt display
-                        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        self.frame_ready.emit(frame_rgb)
-                    else:
-                        self.error_occurred.emit("Failed to read frame from camera")
-                        time.sleep(0.1)
-                else:
-                    time.sleep(0.1)
-            except Exception as e:
-                self.error_occurred.emit(f"Error capturing frame: {str(e)}")
-                time.sleep(0.1)
-    
-    def stop(self):
-        """Stop the thread and release camera"""
-        self.is_running = False
-        if self.camera:
-            self.camera.release()
-        self.wait()
-
-class RadarDataThread(QThread):
-    """Thread for reading radar data without blocking the GUI"""
-    data_ready = pyqtSignal(dict)
-    error_occurred = pyqtSignal(str)
-    
-    def __init__(self):
-        super().__init__()
-        self.radar = None
-        self.is_running = False
-        
-    def setup_radar(self, cli_port, data_port):
-        """Initialize radar interface with specified ports"""
-        try:
-            self.radar = RadarInterface(cli_port, data_port)
-            return True
-        except Exception as e:
-            self.error_occurred.emit(f"Failed to setup radar: {str(e)}")
-            return False
-    
-    def run(self):
-        """Main thread loop for reading radar data"""
-        self.is_running = True
-        while self.is_running:
-            try:
-                if self.radar and self.radar.is_connected():
-                    data = self.radar.read_data()
-                    if data is not None:
-                        self.data_ready.emit(data)
-                else:
-                    time.sleep(0.1)
-            except Exception as e:
-                self.error_occurred.emit(f"Error reading data: {str(e)}")
-                time.sleep(0.1)
-    
-    def stop(self):
-        """Stop the thread and close radar connection"""
-        self.is_running = False
-        if self.radar:
-            self.radar.close()
-        self.wait() 
 
 class RadarGUI(QMainWindow):
     def __init__(self):
@@ -373,79 +106,11 @@ class RadarGUI(QMainWindow):
         
     def scan_available_cameras(self):
         """Scan for available cameras and return a list of camera indices and names"""
-        available_cameras = []
-        consecutive_failures = 0
-        max_consecutive_failures = 2  # Stop after 2 consecutive failures
-        
-        # Suppress OpenCV error messages temporarily
-        old_opencv_log_level = os.environ.get('OPENCV_LOG_LEVEL', '')
-        os.environ['OPENCV_LOG_LEVEL'] = 'FATAL'
-        
-        try:
-            # Test camera indices starting from 0
-            for i in range(10):  # Maximum 10 cameras
-                camera_found = False
-                
-                # Update status for user feedback
-                self.log_status(f"Testing camera {i}...")
-                QApplication.processEvents()  # Keep UI responsive
-                
-                # Try different backends for better compatibility
-                backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
-                
-                for backend in backends:
-                    cap = None
-                    try:
-                        cap = cv2.VideoCapture(i, backend)
-                        # Optimized settings for faster detection
-                        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 300)  # Shorter timeout
-                        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)   # Lower resolution for testing
-                        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
-                        
-                        if cap.isOpened():
-                            # Try to read a frame to confirm the camera works
-                            ret, _ = cap.read()
-                            if ret:
-                                # Get actual camera resolution (after successful test)
-                                width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-                                height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-                                
-                                backend_name = {
-                                    cv2.CAP_DSHOW: "DS",
-                                    cv2.CAP_MSMF: "MSMF", 
-                                    cv2.CAP_ANY: "Default"
-                                }.get(backend, "Unknown")
-                                
-                                camera_name = f"Camera {i} ({int(width)}x{int(height)}, {backend_name})"
-                                available_cameras.append((i, camera_name))
-                                camera_found = True
-                                consecutive_failures = 0  # Reset failure counter
-                                self.log_status(f"✓ Found: {camera_name}")
-                                break  # Found working backend, stop trying others
-                                
-                    except Exception as e:
-                        # Continue to next backend
-                        pass
-                    finally:
-                        if cap is not None:
-                            cap.release()
-                
-                # Track consecutive failures to know when to stop
-                if not camera_found:
-                    consecutive_failures += 1
-                    if consecutive_failures >= max_consecutive_failures:
-                        # Stop scanning after consecutive failures
-                        self.log_status(f"Stopping scan after {max_consecutive_failures} consecutive failures")
-                        break
-                        
-        finally:
-            # Restore original OpenCV log level
-            if old_opencv_log_level:
-                os.environ['OPENCV_LOG_LEVEL'] = old_opencv_log_level
-            else:
-                os.environ.pop('OPENCV_LOG_LEVEL', None)
-                
-        return available_cameras
+        def status_callback(message):
+            self.log_status(message)
+            QApplication.processEvents()  # Keep UI responsive
+            
+        return WebcamThread.scan_available_cameras(status_callback)
         
     def refresh_camera_list(self):
         """Refresh the camera dropdown with available cameras"""
@@ -1162,13 +827,14 @@ class RadarGUI(QMainWindow):
             cli_port = self.cli_port_input.text()
             data_port = self.data_port_input.text()
             
-            if self.radar_thread.setup_radar(cli_port, data_port):
+            success, message = self.radar_thread.setup(cli_port, data_port)
+            if success:
                 self.radar_thread.start()
                 self.connect_btn.setText("Disconnect")
                 self.config_btn.setEnabled(True)
                 self.log_status(f"Connected to CLI: {cli_port}, Data: {data_port}")
             else:
-                self.log_status("Failed to connect to radar")
+                self.log_status(f"Failed to connect to radar: {message}")
         else:
             self.radar_thread.stop()
             self.connect_btn.setText("Connect")
@@ -1370,13 +1036,14 @@ PERFORMANCE: {perf_stats.get('avg_processing_time', 0)*1000:.1f}ms/frame"""
                 self.log_status("No valid camera selected")
                 return
                 
-            if self.webcam_thread.setup_camera(camera_index):
+            success, message = self.webcam_thread.setup(camera_index)
+            if success:
                 self.webcam_thread.start()
                 self.webcam_btn.setText("Stop Webcam")
                 self.webcam_status_label.setText("Webcam: Connected")
                 self.log_status(f"Webcam started ({self.camera_dropdown.currentText()})")
             else:
-                self.log_status("Failed to start webcam")
+                self.log_status(f"Failed to start webcam: {message}")
         else:
             self.webcam_thread.stop()
             self.webcam_btn.setText("Start Webcam")

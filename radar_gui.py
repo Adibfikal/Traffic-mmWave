@@ -13,140 +13,13 @@ import time
 import cv2
 import os
 
-from radar_interface import RadarInterface
+# Import refactored modules
+from threads import WebcamThread, RadarDataThread
+from visualization import BoundingBoxManager, TrailManager, VisualizationCoordinator
+from tracking import EnhancedHDBSCANTracker
 from data_recorder import DataRecorder
-from enhanced_hdbscan_tracker import EnhancedHDBSCANTracker
-from enhanced_visualization import EnhancedTrackingVisualization
+from radar_interface import RadarInterface
 
-class WebcamThread(QThread):
-    """Thread for webcam capture without blocking the GUI"""
-    frame_ready = Signal(np.ndarray)
-    error_occurred = Signal(str)
-    
-    def __init__(self):
-        super().__init__()
-        self.camera = None
-        self.is_running = False
-        self.camera_index = 0
-        
-    def setup_camera(self, camera_index=0):
-        """Initialize camera with specified index"""
-        try:
-            self.camera_index = camera_index
-            
-            # Try different backends for external cameras (Windows)
-            backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
-            
-            for backend in backends:
-                try:
-                    self.camera = cv2.VideoCapture(camera_index, backend)
-                    
-                    if not self.camera.isOpened():
-                        if self.camera:
-                            self.camera.release()
-                        continue
-                        
-                    # Set camera properties for better performance
-                    self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                    self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                    self.camera.set(cv2.CAP_PROP_FPS, 30)
-                    self.camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer lag
-                    
-                    # Test if we can actually read frames
-                    ret, frame = self.camera.read()
-                    if ret and frame is not None:
-                        backend_name = {
-                            cv2.CAP_DSHOW: "DirectShow",
-                            cv2.CAP_MSMF: "Microsoft Media Foundation", 
-                            cv2.CAP_ANY: "Default"
-                        }.get(backend, f"Backend {backend}")
-                        
-                        self.error_occurred.emit(f"Camera {camera_index} connected using {backend_name}")
-                        return True
-                    else:
-                        # Can't read frames, try next backend
-                        self.camera.release()
-                        continue
-                        
-                except Exception as e:
-                    if self.camera:
-                        self.camera.release()
-                    continue
-            
-            # If we get here, all backends failed
-            raise Exception(f"Cannot access camera {camera_index} with any backend. Camera may be in use by another application.")
-                
-        except Exception as e:
-            self.error_occurred.emit(f"Failed to setup camera: {str(e)}")
-            return False
-    
-    def run(self):
-        """Main thread loop for capturing frames"""
-        self.is_running = True
-        while self.is_running:
-            try:
-                if self.camera and self.camera.isOpened():
-                    ret, frame = self.camera.read()
-                    if ret:
-                        # Convert BGR to RGB for Qt display
-                        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        self.frame_ready.emit(frame_rgb)
-                    else:
-                        self.error_occurred.emit("Failed to read frame from camera")
-                        time.sleep(0.1)
-                else:
-                    time.sleep(0.1)
-            except Exception as e:
-                self.error_occurred.emit(f"Error capturing frame: {str(e)}")
-                time.sleep(0.1)
-    
-    def stop(self):
-        """Stop the thread and release camera"""
-        self.is_running = False
-        if self.camera:
-            self.camera.release()
-        self.wait()
-
-class RadarDataThread(QThread):
-    """Thread for reading radar data without blocking the GUI"""
-    data_ready = Signal(dict)
-    error_occurred = Signal(str)
-    
-    def __init__(self):
-        super().__init__()
-        self.radar = None
-        self.is_running = False
-        
-    def setup_radar(self, cli_port, data_port):
-        """Initialize radar interface with specified ports"""
-        try:
-            self.radar = RadarInterface(cli_port, data_port)
-            return True
-        except Exception as e:
-            self.error_occurred.emit(f"Failed to setup radar: {str(e)}")
-            return False
-    
-    def run(self):
-        """Main thread loop for reading radar data"""
-        self.is_running = True
-        while self.is_running:
-            try:
-                if self.radar and self.radar.is_connected():
-                    data = self.radar.read_data()
-                    if data is not None:
-                        self.data_ready.emit(data)
-                else:
-                    time.sleep(0.1)
-            except Exception as e:
-                self.error_occurred.emit(f"Error reading data: {str(e)}")
-                time.sleep(0.1)
-    
-    def stop(self):
-        """Stop the thread and close radar connection"""
-        self.is_running = False
-        if self.radar:
-            self.radar.close()
-        self.wait()
 
 class RadarGUI(QMainWindow):
     def __init__(self):
@@ -158,19 +31,6 @@ class RadarGUI(QMainWindow):
         self.radar_thread = RadarDataThread()
         self.webcam_thread = WebcamThread()
         self.data_recorder = DataRecorder()
-        
-        # Initialize enhanced tracking system
-        self.tracker = EnhancedHDBSCANTracker(
-            min_cluster_size=3,
-            min_samples=2,
-            cluster_selection_epsilon=0.5,
-            max_tracking_distance=2.0
-        )
-        
-        # Initialize enhanced visualization (will be set up after GL widget creation)
-        self.enhanced_visualization = None
-        self.tracking_enabled = False
-        self.tracking_results = None
         
         # Data storage
         self.point_cloud_data = None
@@ -337,22 +197,14 @@ class RadarGUI(QMainWindow):
         main_layout.addWidget(viz_panel, 3)
         
     def create_control_panel(self):
-        """Create the control panel with tabs for main controls and object tracking"""
+        """Create the control panel with main controls"""
         panel = QGroupBox("Controls")
         main_layout = QVBoxLayout()
         
-        # Create tab widget for control panel
-        self.control_tab_widget = QTabWidget()
+        # Create main controls directly (no tabs needed)
+        main_controls = self.create_main_controls_tab()
+        main_layout.addWidget(main_controls)
         
-        # Main Controls Tab
-        main_controls_tab = self.create_main_controls_tab()
-        self.control_tab_widget.addTab(main_controls_tab, "Main Controls")
-        
-        # Object Tracking Tab
-        tracking_tab = self.create_tracking_tab()
-        self.control_tab_widget.addTab(tracking_tab, "Object Tracking")
-        
-        main_layout.addWidget(self.control_tab_widget)
         panel.setLayout(main_layout)
         return panel
     
@@ -508,97 +360,6 @@ class RadarGUI(QMainWindow):
         layout.addStretch()
         main_tab.setLayout(layout)
         return main_tab
-    
-    def create_tracking_tab(self):
-        """Create the object tracking tab with tracking controls and parameters"""
-        tracking_tab = QWidget()
-        layout = QVBoxLayout()
-        
-        # Tracking controls
-        tracking_group = QGroupBox("Object Tracking Controls")
-        tracking_layout = QGridLayout()
-        
-        self.tracking_btn = QPushButton("Enable Tracking")
-        self.tracking_btn.setCheckable(True)
-        self.tracking_btn.toggled.connect(self.toggle_tracking)
-        tracking_layout.addWidget(self.tracking_btn, 0, 0, 1, 2)
-        
-        # Tracking parameters
-        tracking_layout.addWidget(QLabel("Min Cluster Size:"), 1, 0)
-        self.min_cluster_size_spin = QSpinBox()
-        self.min_cluster_size_spin.setMinimum(2)
-        self.min_cluster_size_spin.setMaximum(20)
-        self.min_cluster_size_spin.setValue(3)
-        self.min_cluster_size_spin.valueChanged.connect(self.update_tracking_params)
-        tracking_layout.addWidget(self.min_cluster_size_spin, 1, 1)
-        
-        tracking_layout.addWidget(QLabel("Max Track Distance:"), 2, 0)
-        self.max_track_distance_spin = QSpinBox()
-        self.max_track_distance_spin.setMinimum(1)
-        self.max_track_distance_spin.setMaximum(10)
-        self.max_track_distance_spin.setValue(2)
-        self.max_track_distance_spin.valueChanged.connect(self.update_tracking_params)
-        tracking_layout.addWidget(self.max_track_distance_spin, 2, 1)
-        
-        tracking_group.setLayout(tracking_layout)
-        layout.addWidget(tracking_group)
-        
-        # Advanced tracking parameters
-        advanced_group = QGroupBox("Advanced Parameters")
-        advanced_layout = QGridLayout()
-        
-        advanced_layout.addWidget(QLabel("Min Samples:"), 0, 0)
-        self.min_samples_spin = QSpinBox()
-        self.min_samples_spin.setMinimum(1)
-        self.min_samples_spin.setMaximum(20)
-        self.min_samples_spin.setValue(2)
-        self.min_samples_spin.valueChanged.connect(self.update_tracking_params)
-        advanced_layout.addWidget(self.min_samples_spin, 0, 1)
-        
-        advanced_layout.addWidget(QLabel("Cluster Epsilon:"), 1, 0)
-        self.cluster_epsilon_spin = QSpinBox()
-        self.cluster_epsilon_spin.setMinimum(1)
-        self.cluster_epsilon_spin.setMaximum(50)
-        self.cluster_epsilon_spin.setValue(5)  # Represents 0.5 (value/10)
-        self.cluster_epsilon_spin.setSuffix(" (×0.1)")
-        self.cluster_epsilon_spin.valueChanged.connect(self.update_tracking_params)
-        advanced_layout.addWidget(self.cluster_epsilon_spin, 1, 1)
-        
-        advanced_layout.addWidget(QLabel("Min Confidence:"), 2, 0)
-        self.min_confidence_spin = QSpinBox()
-        self.min_confidence_spin.setMinimum(1)
-        self.min_confidence_spin.setMaximum(100)
-        self.min_confidence_spin.setValue(30)  # Represents 0.3 (value/100)
-        self.min_confidence_spin.setSuffix(" (%)")
-        self.min_confidence_spin.valueChanged.connect(self.update_tracking_params)
-        advanced_layout.addWidget(self.min_confidence_spin, 2, 1)
-        
-        advanced_group.setLayout(advanced_layout)
-        layout.addWidget(advanced_group)
-        
-        # Tracking information
-        info_group = QGroupBox("Tracking Information")
-        info_layout = QVBoxLayout()
-        
-        info_text = QLabel(
-            "HDBSCAN + Particle Filter Tracking:\n\n"
-            "• Min Cluster Size: Minimum points to form a cluster\n"
-            "• Max Track Distance: Maximum distance for data association\n"
-            "• Min Samples: Minimum samples for HDBSCAN core points\n"
-            "• Cluster Epsilon: Distance threshold for cluster selection\n"
-            "• Min Confidence: Minimum confidence for valid detections\n\n"
-            "Tracked objects appear as colored markers in the 3D visualization."
-        )
-        info_text.setWordWrap(True)
-        info_text.setStyleSheet("QLabel { color: gray; font-size: 10px; }")
-        info_layout.addWidget(info_text)
-        
-        info_group.setLayout(info_layout)
-        layout.addWidget(info_group)
-        
-        layout.addStretch()
-        tracking_tab.setLayout(layout)
-        return tracking_tab
         
     def create_visualization_panel(self):
         """Create the visualization panel with tabs for radar and combined view"""
@@ -840,44 +601,6 @@ class RadarGUI(QMainWindow):
             self.log_status("Debug mode disabled")
             print("\n=== Point Cloud Debug Mode Disabled ===\n")
     
-    def toggle_tracking(self, checked):
-        """Toggle object tracking on/off"""
-        self.tracking_enabled = checked
-        if checked:
-            self.tracking_btn.setText("Disable Tracking")
-            self.log_status("Object tracking enabled - HDBSCAN clustering + Particle Filter")
-            print("\n=== Object Tracking Enabled ===")
-            print("Using HDBSCAN clustering with Particle Filter tracking")
-        else:
-            self.tracking_btn.setText("Enable Tracking")
-            self.log_status("Object tracking disabled")
-            print("\n=== Object Tracking Disabled ===")
-            # Clear tracking results
-            self.tracking_results = None
-            
-    def update_tracking_params(self):
-        """Update tracking algorithm parameters"""
-        if hasattr(self, 'tracker'):
-            # Update enhanced tracker parameters using the new API
-            params = {
-                'min_cluster_size': self.min_cluster_size_spin.value(),
-                'max_tracking_distance': float(self.max_track_distance_spin.value())
-            }
-            
-            # Add advanced parameters if they exist
-            if hasattr(self, 'min_samples_spin'):
-                params['min_samples'] = self.min_samples_spin.value()
-            if hasattr(self, 'cluster_epsilon_spin'):
-                params['cluster_selection_epsilon'] = self.cluster_epsilon_spin.value() / 10.0
-            
-            self.tracker.update_parameters(**params)
-            
-            self.log_status(f"Updated tracking params: min_cluster_size={params['min_cluster_size']}, "
-                          f"max_distance={params['max_tracking_distance']}")
-            print(f"TRACKING: Updated parameters - {params}")
-    
-
-    
     def toggle_webcam(self):
         """Start or stop webcam capture"""
         if self.webcam_btn.text() == "Start Webcam":
@@ -1017,31 +740,31 @@ class RadarGUI(QMainWindow):
             if data['pointCloud'] is not None and len(data['pointCloud']) > 0:
                 self.point_cloud_data = np.array(data['pointCloud'])
                 
-                # Process tracking if enabled
-                if self.tracking_enabled and self.point_cloud_data is not None:
-                    try:
-                        self.tracking_results = self.tracker.process_frame(self.point_cloud_data, current_time)
-                        
-                        # Log tracking info periodically
-                        if self.tracking_results['frame_stats']['frame_count'] % 20 == 0:
-                            n_tracks = self.tracking_results['frame_stats']['active_tracks']
-                            n_detections = len(self.tracking_results['detections'])
-                            proc_time = self.tracking_results['processing_time'] * 1000
-                            print(f"TRACKING: Frame {self.tracking_results['frame_stats']['frame_count']}: "
-                                  f"{n_tracks} tracks, {n_detections} detections, {proc_time:.1f}ms")
-                                  
-                    except Exception as e:
-                        print(f"TRACKING ERROR: {e}")
-                        self.tracking_results = None
+                # Process tracking if enabled (Tracking not available in simplified GUI)
+                # if self.tracking_enabled and self.point_cloud_data is not None:
+                #     try:
+                #         self.tracking_results = self.tracker.process_frame(self.point_cloud_data, current_time)
+                #         
+                #         # Log tracking info periodically
+                #         if self.tracking_results['frame_stats']['frame_count'] % 20 == 0:
+                #             n_tracks = self.tracking_results['frame_stats']['active_tracks']
+                #             n_detections = len(self.tracking_results['detections'])
+                #             proc_time = self.tracking_results['processing_time'] * 1000
+                #             print(f"TRACKING: Frame {self.tracking_results['frame_stats']['frame_count']}: "
+                #                   f"{n_tracks} tracks, {n_detections} detections, {proc_time:.1f}ms")
+                #                   
+                #     except Exception as e:
+                #         print(f"TRACKING ERROR: {e}")
+                #         self.tracking_results = None
             else:
                 self.point_cloud_data = None
-                if self.tracking_enabled:
-                    # Process empty frame for tracking (predictions only)
-                    try:
-                        self.tracking_results = self.tracker.process_frame(np.array([]), current_time)
-                    except Exception as e:
-                        print(f"TRACKING ERROR (empty frame): {e}")
-                        self.tracking_results = None
+                # if self.tracking_enabled:
+                #     # Process empty frame for tracking (predictions only)
+                #     try:
+                #         self.tracking_results = self.tracker.process_frame(np.array([]), current_time)
+                #     except Exception as e:
+                #         print(f"TRACKING ERROR (empty frame): {e}")
+                #         self.tracking_results = None
             
             # Debug mode: print point cloud data to terminal
             if self.debug_checkbox.isChecked() and self.point_cloud_data is not None and len(self.point_cloud_data) > 0:
@@ -1074,15 +797,17 @@ class RadarGUI(QMainWindow):
             num_points = len(self.point_cloud_data) if self.point_cloud_data is not None else 0
             self.points_label.setText(f"Points: {num_points}")
             
-            # Update tracking statistics
-            if self.tracking_enabled and self.tracking_results:
-                self.tracking_status_label.setText("Tracking: Active")
-                n_tracks = self.tracking_results.get('frame_stats', {}).get('active_tracks', 0)
-                n_detections = len(self.tracking_results.get('detections', []))
-                self.tracks_label.setText(f"Tracks: {n_tracks} | Detections: {n_detections}")
-            else:
-                self.tracking_status_label.setText("Tracking: Disabled" if not self.tracking_enabled else "Tracking: No Data")
-                self.tracks_label.setText("Tracks: 0")
+            # Update tracking statistics (Tracking not available in simplified GUI)
+            # if self.tracking_enabled and self.tracking_results:
+            #     self.tracking_status_label.setText("Tracking: Active")
+            #     n_tracks = self.tracking_results.get('frame_stats', {}).get('active_tracks', 0)
+            #     n_detections = len(self.tracking_results.get('detections', []))
+            #     self.tracks_label.setText(f"Tracks: {n_tracks} | Detections: {n_detections}")
+            # else:
+            #     self.tracking_status_label.setText("Tracking: Disabled" if not self.tracking_enabled else "Tracking: No Data")
+            #     self.tracks_label.setText("Tracks: 0")
+            self.tracking_status_label.setText("Tracking: Not Available (Use PyQt6 version)")
+            self.tracks_label.setText("Tracks: 0")
             
             # Calculate and update FPS (less frequently for performance)
             if current_time - self.last_fps_update > 1.0:  # Update FPS every second
@@ -1218,50 +943,6 @@ class RadarGUI(QMainWindow):
                 # Clear 3D scatter plot for combined view
                 if hasattr(self, 'point_scatter_3d_combined'):
                     self.point_scatter_3d_combined.setData(pos=np.array([[0, 0, 0]]))
-        
-        # Update enhanced tracking visualization if tracking is enabled
-        if self.tracking_enabled and self.tracking_results and 'tracks' in self.tracking_results:
-            tracks = self.tracking_results['tracks']
-            if tracks:
-                # Extract track positions and motion states
-                track_positions = np.array([track['position'] for track in tracks])
-                
-                # Create colors based on motion state (as requested by user)
-                motion_state_colors = {
-                    'stationary': [1, 0, 0, 1],         # Red for stationary
-                    'constant_velocity': [0, 1, 0, 1],  # Green for constant velocity
-                    'maneuvering': [0, 0, 1, 1]         # Blue for maneuvering
-                }
-                
-                # Create color array based on motion states
-                track_colors = []
-                for track in tracks:
-                    motion_state = track.get('motion_state', 'constant_velocity')
-                    color = motion_state_colors.get(motion_state, [1, 1, 1, 1])  # Default white
-                    track_colors.append(color)
-                
-                track_colors = np.array(track_colors)
-                
-                # Use larger size for better visibility (as requested by user)
-                track_size = 0.5
-                
-                # Update tracking scatter plots with enhanced visualization
-                if hasattr(self, 'track_scatter'):
-                    self.track_scatter.setData(pos=track_positions, color=track_colors, size=track_size)
-                if hasattr(self, 'track_scatter_3d_combined'):
-                    self.track_scatter_3d_combined.setData(pos=track_positions, color=track_colors, size=track_size)
-            else:
-                # Clear tracking displays when no tracks
-                if hasattr(self, 'track_scatter'):
-                    self.track_scatter.setData(pos=np.array([[0, 0, 0]]), color=np.array([[1, 0, 0, 0]]), size=0.1)
-                if hasattr(self, 'track_scatter_3d_combined'):
-                    self.track_scatter_3d_combined.setData(pos=np.array([[0, 0, 0]]), color=np.array([[1, 0, 0, 0]]), size=0.1)
-        else:
-            # Clear tracking displays when tracking disabled
-            if hasattr(self, 'track_scatter'):
-                self.track_scatter.setData(pos=np.array([[0, 0, 0]]), color=np.array([[1, 0, 0, 0]]), size=0.1)
-            if hasattr(self, 'track_scatter_3d_combined'):
-                self.track_scatter.setData(pos=np.array([[0, 0, 0]]), color=np.array([[1, 0, 0, 0]]), size=0.1)
         
         self.last_visualization_update = current_time
         
